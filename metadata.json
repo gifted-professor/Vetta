@@ -1,0 +1,7 @@
+{
+  "description": "Cross-border Influencer AI Audit System (POC) powered by Gemini 3.0 Pro Flash",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "name": "App"
+}
