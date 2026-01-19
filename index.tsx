@@ -42,14 +42,15 @@ import {
   XCircle,
   AlertTriangle,
   Ban,
-  Timer
+  Timer,
+  Images as ImagesIcon
 } from 'lucide-react';
 
 // --- i18n Dictionary ---
 const translations = {
   zh: {
     app_title: "跨境网红 AI 智能审计系统",
-    app_version: "MVP POC PHASE v2.6 - 专业风险审计版",
+    app_version: "MVP POC PHASE v2.9 - 加权博弈审计版",
     status_active: "Gemini 3.0 Pro 已激活",
     mode_manual: "手动截图模式",
     mode_auto: "Apify 自动抓取",
@@ -62,32 +63,32 @@ const translations = {
     depth_standard: "标准画像 (9-12条)",
     depth_deep: "深度背调 (13-15条)",
     btn_start: "开始智能审计",
-    btn_loading: "系统正在深度扫描...",
+    btn_loading: "系统正在执行加权分析...",
     waiting_data: "等待输入审计指令",
-    waiting_desc: "Gemini 3.0 Pro 将在扫描博主视觉资产后，为您呈现一份包含风险预警的深度审计方案。",
+    waiting_desc: "Gemini 3.0 Pro 将在并行扫描视觉资产后，为您呈现一份包含“首图欺诈”检测的深度审计方案。",
     loading_title: "AI 深度审计画像中",
-    loading_desc: "正在交叉验证赛道适配度、受众重合度与品牌安全...",
-    report_title: "视觉审美与适配报告",
-    vision_insight: "博主核心赛道定位",
+    loading_desc: "正在执行“多图穿透”审计，正在并行抓取所有素材...",
+    report_title: "加权审计结果报告",
+    vision_insight: "视觉资产深度透视",
     outreach_title: "智选开发信开头",
     outreach_detail: "基于最近动态细节生成的个性化话术",
     copy_btn: "复制话术",
     sync_feishu: "同步至飞书",
-    final_verdict: "终审结论与风险分析",
+    final_verdict: "审计结论 (核心权重分配)",
     apify_token_label: "Apify API Token",
     error_apify_failed: "数据抓取失败，请检查 Token。",
     copied: "已复制",
-    log_init: "初始化审计引擎...",
+    log_init: "初始化加权审计引擎...",
     log_apify_start: "抓取博主时间轴数据...",
     log_apify_success: "获取原始数据成功。",
-    log_image_extract: "提取视觉特征中...",
-    log_ai_start: "Gemini 3.0 Pro 正在执行“红蓝对抗”审计...",
-    log_ai_done: "审计完成，已识别潜在风险点。",
+    log_image_extract: "启动并行多图提取...",
+    log_ai_start: "Gemini 3.0 正在执行权重博弈算法...",
+    log_ai_done: "审计完成，已捕捉审美质量衰减风险。",
     overview_title: "博主动态快照",
     avg_likes: "平均点赞",
     avg_comments: "平均评论",
     cost_est: "本次审计预估成本",
-    cost_hint: "基于深度审计模式估算",
+    cost_hint: "基于深度加权审计模式估算",
     cost_apify: "Apify 费用",
     cost_ai: "AI 费用",
     ad_ratio: "商业化比例",
@@ -95,14 +96,14 @@ const translations = {
     trend_analysis: "近期趋势分析",
     error_title: "审计流程中断",
     error_retry: "重试审计",
-    risk_label: "风险提示 (Red Flags)",
-    mismatch_warning: "⚠️ 适配度极低警告",
+    risk_label: "致命风险风险点 (Risk Flags)",
+    mismatch_warning: "⚠️ 【不建议合作】 品牌调性极差",
     analysis_duration: "分析耗时",
     sec_unit: "秒"
   },
   en: {
     app_title: "Influencer AI Audit System",
-    app_version: "MVP POC PHASE v2.6 - Risk Audit",
+    app_version: "MVP POC PHASE v2.9 - Weighted Audit",
     status_active: "Gemini 3.0 Pro Active",
     mode_manual: "Manual Mode",
     mode_auto: "Apify Auto-Fetch",
@@ -115,32 +116,32 @@ const translations = {
     depth_standard: "Profile (9-12)",
     depth_deep: "Due Diligence (13-15)",
     btn_start: "Start AI Audit",
-    btn_loading: "Processing Data...",
+    btn_loading: "Weighted Profiling...",
     waiting_data: "Waiting for Input",
-    waiting_desc: "AI will analyze cross-category fit and potential conversion risks.",
+    waiting_desc: "AI will analyze multi-image narratives and detect cover-baiting.",
     loading_title: "Deep Risk Profiling",
-    loading_desc: "Validating niche alignment, audience overlap and brand safety...",
-    report_title: "Aesthetic & Fit Report",
-    vision_insight: "Core Niche Positioning",
+    loading_desc: "Executing parallel fetch and performing visual narrative checks...",
+    report_title: "Weighted Audit Report",
+    vision_insight: "Visual Asset Deep-Dive",
     outreach_title: "Smart Greeting",
     outreach_detail: "Personalized based on recent details",
     copy_btn: "Copy",
     sync_feishu: "Sync to Feishu",
-    final_verdict: "Final Verdict & Risk Analysis",
+    final_verdict: "Final Verdict (Core Weights)",
     apify_token_label: "Apify API Token",
     error_apify_failed: "Apify failed.",
     copied: "Copied!",
-    log_init: "Initializing audit engine...",
+    log_init: "Initializing weighted engine...",
     log_apify_start: "Starting deep crawler...",
     log_apify_success: "Time-series data retrieved!",
-    log_image_extract: "Extracting visual assets...",
-    log_ai_start: "Gemini performing adversarial audit...",
+    log_image_extract: "Parallel fetching carousel assets...",
+    log_ai_start: "Gemini performing adversarial weighting...",
     log_ai_done: "Audit complete.",
     overview_title: "Feed Snapshot",
     avg_likes: "Avg Likes",
     avg_comments: "Avg Comments",
     cost_est: "Est. Run Cost",
-    cost_hint: "Based on deep profiling mode",
+    cost_hint: "Based on parallel deep profiling",
     cost_apify: "Apify Cost",
     cost_ai: "AI Cost",
     ad_ratio: "Commercial Ratio",
@@ -149,7 +150,7 @@ const translations = {
     error_title: "Audit Interrupted",
     error_retry: "Retry Audit",
     risk_label: "Risk Flags",
-    mismatch_warning: "⚠️ Low Fit Warning",
+    mismatch_warning: "⚠️ [DO NOT COOPERATE] Poor Fit",
     analysis_duration: "Duration",
     sec_unit: "s"
   }
@@ -198,7 +199,6 @@ const App = () => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
-  // Clean up timer on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) window.clearInterval(timerRef.current);
@@ -274,33 +274,60 @@ const App = () => {
       setRawApifyData(data);
       addLog(t.log_apify_success);
       
-      const postsContext = data.map((p: any, i: number) => `Post #${i+1}: Likes: ${p.likesCount}, Comments: ${p.commentsCount}, Caption: ${p.caption}`).join('\n---\n');
-      const urlsToFetch = data.slice(0, 6).map((item: any) => item.displayUrl).filter((u: string) => !!u);
-      addLog(`${t.log_image_extract} (${urlsToFetch.length} images)`);
+      // Extraction logic for multi-image carousels
+      const urlsToFetch: string[] = [];
+      data.slice(0, 5).forEach((post: any) => {
+        if (post.displayUrl) urlsToFetch.push(post.displayUrl);
+        if (post.childPosts && post.childPosts.length > 0) {
+          post.childPosts.slice(0, 2).forEach((child: any) => {
+            if (child.displayUrl) urlsToFetch.push(child.displayUrl);
+          });
+        }
+      });
+
+      const finalUrls = urlsToFetch.slice(0, 12);
+      addLog(`${t.log_image_extract} (${finalUrls.length} assets)...`);
       
-      const validBase64Images: string[] = [];
-      for (const u of urlsToFetch) {
-        const b64 = await imageUrlToBase64(u);
-        if (b64) validBase64Images.push(b64);
-      }
+      // PARALLEL EXECUTION for image fetching
+      const b64Promises = finalUrls.map(u => imageUrlToBase64(u));
+      const b64Results = await Promise.all(b64Promises);
+      const validBase64Images = b64Results.filter(b => b !== null) as string[];
+
       setImages(validBase64Images.map(b64 => ({ preview: `data:image/jpeg;base64,${b64}`, base64: b64 })));
+      addLog(`Parallel fetch complete. Captured ${validBase64Images.length} images.`);
+
+      const postsContext = data.map((p: any, i: number) => `Post #${i+1}: Likes: ${p.likesCount}, Comments: ${p.commentsCount}, Caption: ${p.caption}`).join('\n---\n');
 
       addLog(t.log_ai_start);
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const imageParts = validBase64Images.map(b64 => ({ inlineData: { data: b64, mimeType: "image/jpeg" } }));
       
-      const systemPrompt = `You are a CRITICAL, SKEPTICAL influencer marketing auditor. Your job is to prevent brand mismatch disasters.
-       influencer analysis instructions:
-      1. First, identify the Influencer's Niche (e.g., Music, Tech, Beauty).
-      2. Analyze the audience: Gender balance, age, and interest based on content.
-      3. Evaluate the Brand Fit for: "${brandProfile}".
-      4. IF THE PRODUCT IS TOTALLY UNRELATED (e.g., Razors for a Female Folk Musician with a female audience), YOU MUST GIVE A SCORE BELOW 30 and LIST MAJOR RISKS.
-      5. BE HONEST. Do not give praise where it's not earned.
-      Return valid JSON only.`;
+      // REFINED PROMPT with WEIGHTED ALLOCATION
+      const systemPrompt = `你是一位毒舌、专业的跨境营销审计官，你的目标是为品牌方省下错误的预算。
+请按照以下【权重优先级】执行审计：
+
+1. 【第一优先级：红线审查 (权重 50%)】
+   - 核心任务：判断品牌 "${brandProfile}" 与博主受众的“生殖隔离”。
+   - 判定准则：如果是男士理容产品配对女性博主，或硬核科技配对纯感性艺术博主，即使对方粉丝再多，分值也严禁超过 25 分。
+   - 强制动作：在 risk_factors 中必须列出“受众错配”风险。
+
+2. 【第二优先级：多图穿透审计 (权重 30%)】
+   - 核心任务：对比分析收到的 12 张图片。
+   - 判定准则：识别属于同一条帖子（Carousel）的图片序列。如果封面（第一张）极美，但后续副图（第二、三张）质感断崖式下跌、构图凌乱或光影廉价，说明博主人设属于“精装修”，人设稳定性（consistency_score）需扣除 40 分。
+   - 记录：如果发现此现象，在 risk_factors 中注明“Coverbaiting quality decay (封面欺诈)”。
+
+3. 【第三优先级：互动去噪分析 (权重 20%)】
+   - 核心任务：阅读最近动态的评论细节。
+   - 判定准则：如果评论全是 Emoji 或 "Love it" 等通用词，判定为低价值粉丝；如果评论涉及具体的歌词、特定的产品问题或长段文字，判定为高粘性。
+
+【输出要求】：
+- 严禁给出模棱两可的评价。
+- 如果 brand_fit_score 低于 40，audit_reason 必须以“【不建议合作】”开头并说明致命伤。
+- 必须返回标准 JSON 格式。`;
 
       const res = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: { parts: [...imageParts as any, { text: `Deep Audit for Brand Fit: ${brandProfile}\n\nFeed Context:\n${postsContext}` }] },
+        contents: { parts: [...imageParts as any, { text: `Target Brand Profile: ${brandProfile}\n\nSocial Feed Data:\n${postsContext}` }] },
         config: {
           systemInstruction: systemPrompt,
           responseMimeType: "application/json",
@@ -323,7 +350,7 @@ const App = () => {
       });
 
       const parsedResult = JSON.parse(cleanJsonResponse(res.text || '{}'));
-      setCostEst(calculateCost(data.length, 16000)); 
+      setCostEst(calculateCost(data.length, 32000)); 
       setResult(parsedResult);
       addLog(t.log_ai_done);
     } catch (err: any) {
@@ -432,7 +459,7 @@ const App = () => {
           ) : result ? (
             <div className="space-y-10 animate-in fade-in slide-in-from-bottom-6 duration-1000">
               {result.brand_fit_score < 40 && (
-                <div className="bg-amber-500 text-white px-10 py-6 rounded-full flex items-center justify-between shadow-lg ring-4 ring-amber-100 animate-pulse">
+                <div className="bg-amber-600 text-white px-10 py-6 rounded-[2rem] flex items-center justify-between shadow-lg ring-4 ring-amber-100">
                   <div className="flex items-center gap-4"><Ban size={28} /><h3 className="text-lg font-black">{t.mismatch_warning}</h3></div>
                   <div className="text-2xl font-black">{result.brand_fit_score}</div>
                 </div>
@@ -440,7 +467,7 @@ const App = () => {
 
               {metrics && (
                 <div className="bg-white p-10 rounded-[3rem] border border-slate-100 shadow-xl flex items-center gap-10">
-                  <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center text-slate-300"><UserCircle2 size={56} /></div>
+                  <div className="w-24 h-24 bg-slate-100 rounded-full flex items-center justify-center text-slate-300 overflow-hidden"><UserCircle2 size={56} /></div>
                   <div className="flex-1">
                     <h3 className="text-3xl font-black italic">@{metrics.user}</h3>
                     <div className="px-4 py-1.5 bg-indigo-50 text-indigo-600 rounded-full text-[10px] font-black inline-block mt-2 uppercase tracking-widest">{result.niche_category[lang]}</div>
@@ -457,15 +484,25 @@ const App = () => {
                 </div>
               )}
 
-              <div className="grid grid-cols-3 gap-6">
-                {images.map((img, i) => <div key={i} className="aspect-square rounded-[2rem] overflow-hidden shadow-xl border-4 border-white"><img src={img.preview} className="w-full h-full object-cover" /></div>)}
+              <div className="grid grid-cols-4 gap-4">
+                {images.map((img, i) => (
+                  <div key={i} className="aspect-square rounded-2xl overflow-hidden shadow-md border-2 border-white relative group">
+                    <img src={img.preview} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                    <div className="absolute bottom-2 left-2 px-2 py-0.5 bg-black/50 backdrop-blur-md rounded-full text-[9px] text-white font-bold">Asset #{i + 1}</div>
+                  </div>
+                ))}
               </div>
 
               {result.risk_factors?.[lang]?.length > 0 && (
                 <div className="bg-rose-50 p-10 rounded-[3rem] border border-rose-100">
-                  <h3 className="text-rose-600 font-black flex items-center gap-3 mb-6"><XCircle />{t.risk_label}</h3>
+                  <h3 className="text-rose-600 font-black flex items-center gap-3 mb-6 uppercase tracking-wider text-sm"><XCircle size={18} />{t.risk_label}</h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {result.risk_factors[lang].map((risk, i) => <div key={i} className="flex gap-3 text-rose-800 text-sm font-bold bg-white/50 p-4 rounded-2xl"><span>•</span>{risk}</div>)}
+                    {result.risk_factors[lang].map((risk, i) => (
+                      <div key={i} className="flex gap-3 text-rose-800 text-sm font-bold bg-white/50 p-4 rounded-2xl border border-rose-200/50">
+                        <AlertCircle className="shrink-0 text-rose-500" size={16} />
+                        {risk}
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -473,7 +510,7 @@ const App = () => {
               <div className="bg-white p-12 rounded-[3.5rem] border border-slate-100 shadow-xl">
                 <div className="flex items-center justify-between mb-10">
                   <div className="flex items-center gap-3"><Star className="text-yellow-400 fill-yellow-400" /> <h3 className="text-2xl font-black">{t.report_title}</h3></div>
-                  <div className="text-5xl font-black bg-gradient-to-br from-indigo-600 to-violet-700 bg-clip-text text-transparent">{result.brand_fit_score}<span className="text-sm text-slate-200">/10</span></div>
+                  <div className="text-5xl font-black bg-gradient-to-br from-indigo-600 to-violet-700 bg-clip-text text-transparent">{result.brand_fit_score}<span className="text-sm text-slate-200">/100</span></div>
                 </div>
                 <div className="p-8 bg-indigo-50/30 rounded-[2rem] border border-indigo-100/50 mb-8">
                   <h4 className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mb-3 flex items-center gap-2"><Target size={14} />{t.vision_insight}</h4>
@@ -509,17 +546,11 @@ const App = () => {
       <div className="fixed bottom-8 left-1/2 -translate-x-1/2 bg-slate-900/90 backdrop-blur-md px-8 py-3 rounded-full border border-white/10 shadow-2xl flex items-center gap-6 z-50">
         <div className="flex items-center gap-2"><div className="w-2 h-2 bg-green-500 rounded-full animate-pulse shadow-[0_0_10px_#22c55e]"></div><span className="text-[10px] font-black text-white/70 uppercase tracking-widest">{t.status_active}</span></div>
         <div className="w-px h-4 bg-white/10"></div>
-        <div className="flex items-center gap-2 text-indigo-400"><History size={14} /><span className="text-[10px] font-black uppercase tracking-widest">v2.6 Critical-Risk Enabled</span></div>
+        <div className="flex items-center gap-2 text-indigo-400"><ImagesIcon size={14} /><span className="text-[10px] font-black uppercase tracking-widest">v2.9 Weighted Game Theory Audit Mode</span></div>
       </div>
     </div>
   );
 };
-
-const Key = ({ className }: { className?: string }) => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className={className}>
-    <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3m-3-3l-4-4" />
-  </svg>
-);
 
 const root = createRoot(document.getElementById('root')!);
 root.render(<App />);
