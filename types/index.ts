@@ -102,3 +102,10 @@ export interface AuditResult {
     external_url?: string;
   };
 }
+
+export type AuditDraft = {
+  profile?: Partial<AuditResult['profile']>;
+  recent_posts?: AuditResult['recent_posts'];
+  consistency_score?: number;
+  brand_fit_score?: number;
+};

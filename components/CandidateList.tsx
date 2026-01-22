@@ -19,6 +19,21 @@ export const CandidateList: React.FC<CandidateListProps> = ({
   const t = translations[lang];
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
+  const HoverTip: React.FC<{ text: string; className?: string; children: React.ReactNode }> = ({
+    text,
+    className,
+    children,
+  }) => {
+    return (
+      <div className={`relative group ${className || ''}`}>
+        {children}
+        <div className="pointer-events-none absolute left-0 top-full z-50 mt-1 hidden w-[320px] max-w-[80vw] rounded-2xl bg-slate-900 px-3 py-2 text-[10px] font-bold leading-relaxed text-white shadow-xl group-hover:block">
+          {text}
+        </div>
+      </div>
+    );
+  };
+
   const handleCopyLink = (username: string) => {
     const link = `https://www.instagram.com/${username}/`;
     navigator.clipboard.writeText(link).then(() => {
@@ -49,7 +64,7 @@ export const CandidateList: React.FC<CandidateListProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {candidates.map((c, i) => (
           <div
-            key={i}
+            key={c.id || i}
             className={`bg-white p-6 rounded-[2.5rem] border ${
               c.is_commercial ? 'opacity-60 grayscale-[0.5]' : 'border-slate-100 shadow-lg'
             } flex items-center justify-between group hover:border-indigo-300 transition-all relative overflow-hidden`}
@@ -93,7 +108,7 @@ export const CandidateList: React.FC<CandidateListProps> = ({
                       }
                       if (img.dataset.fallback !== '1') {
                         img.dataset.fallback = '1';
-                        img.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(raw)}`;
+                        img.src = `/api/image?url=${encodeURIComponent(raw)}&fallback=1&v=${Date.now()}`;
                         return;
                       }
                       img.src = '';
@@ -129,21 +144,22 @@ export const CandidateList: React.FC<CandidateListProps> = ({
                       N/A
                     </span>
                   )}
-                  <span
-                    className="text-slate-400 text-[8px] font-bold uppercase tracking-wider truncate"
-                    title={[c.match_reason, ...(c.match_signals || [])].filter(Boolean).join(' · ')}
+                  <HoverTip
+                    className="min-w-0"
+                    text={[c.match_reason, ...(c.match_signals || [])].filter(Boolean).join(' · ')}
                   >
-                    {c.match_reason}
-                    {c.match_signals?.length ? ` · ${c.match_signals.join(' · ')}` : ''}
-                  </span>
+                    <span className="text-slate-400 text-[8px] font-bold uppercase tracking-wider truncate block">
+                      {c.match_reason}
+                      {c.match_signals?.length ? ` · ${c.match_signals.join(' · ')}` : ''}
+                    </span>
+                  </HoverTip>
                 </div>
                 {c.ai_summary && (
-                  <div
-                    className="mt-1 text-[8px] font-bold text-slate-500 tracking-tight truncate"
-                    title={c.ai_summary}
-                  >
-                    {c.ai_summary}
-                  </div>
+                  <HoverTip className="mt-1 min-w-0" text={c.ai_summary}>
+                    <div className="text-[8px] font-bold text-slate-500 tracking-tight truncate">
+                      {c.ai_summary}
+                    </div>
+                  </HoverTip>
                 )}
               </div>
             </div>

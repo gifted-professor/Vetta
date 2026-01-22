@@ -91,7 +91,7 @@ export const AuditReport: React.FC<AuditReportProps> = ({ lang, result }) => {
                    }
                    if (img.dataset.fallback !== '1') {
                      img.dataset.fallback = '1';
-                     img.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(raw)}`;
+                    img.src = `/api/image?url=${encodeURIComponent(raw)}&fallback=1&v=${Date.now()}`;
                      return;
                    }
                    img.src = '';
@@ -151,7 +151,7 @@ export const AuditReport: React.FC<AuditReportProps> = ({ lang, result }) => {
                     }
                     if (img.dataset.fallback !== '1') {
                       img.dataset.fallback = '1';
-                      img.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(raw)}`;
+                      img.src = `/api/image?url=${encodeURIComponent(raw)}&fallback=1&v=${Date.now()}`;
                       return;
                     }
                     img.style.display = 'none';

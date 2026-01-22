@@ -114,6 +114,7 @@ const imageProxyPlugin = () => {
         try {
           const requestUrl = new URL(req.url || '', 'http://localhost');
           const target = requestUrl.searchParams.get('url');
+          const forceFallback = requestUrl.searchParams.get('fallback') === '1';
           if (!target) {
             res.statusCode = 400;
             res.end('Missing url');
@@ -127,16 +128,37 @@ const imageProxyPlugin = () => {
             return;
           }
 
-          const upstream = await fetch(parsed.toString(), { 
+          const sendOk = async (upstream: Response) => {
+            const contentType = upstream.headers.get('content-type');
+            res.setHeader('content-type', contentType || 'image/jpeg');
+            res.setHeader('cache-control', 'public, max-age=300');
+            res.setHeader('cross-origin-resource-policy', 'cross-origin');
+            res.statusCode = 200;
+            const arrayBuffer = await upstream.arrayBuffer();
+            res.end(Buffer.from(arrayBuffer));
+          };
+
+          if (forceFallback) {
+            const fallbackUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(parsed.toString())}`;
+            const fallback = await fetch(fallbackUrl, { redirect: 'follow' });
+            if (!fallback.ok) {
+              res.statusCode = 502;
+              res.end(`Upstream error: ${fallback.status}`);
+              return;
+            }
+            await sendOk(fallback);
+            return;
+          }
+
+          const upstream = await fetch(parsed.toString(), {
             redirect: 'follow',
             headers: {
               'User-Agent': 'Mozilla/5.0',
               'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-              'Referer': 'https://www.instagram.com/'
-            }
+              'Referer': 'https://www.instagram.com/',
+            },
           });
           if (!upstream.ok) {
-            console.log(`Direct proxy failed (${upstream.status}). Trying fallback for: ${target}`);
             const fallbackUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(parsed.toString())}`;
             const fallback = await fetch(fallbackUrl, { redirect: 'follow' });
             if (!fallback.ok) {
@@ -144,22 +166,11 @@ const imageProxyPlugin = () => {
               res.end(`Upstream error: ${upstream.status}`);
               return;
             }
-            const fallbackType = fallback.headers.get('content-type');
-            if (fallbackType) res.setHeader('content-type', fallbackType);
-            res.setHeader('cache-control', 'public, max-age=300');
-            res.statusCode = 200;
-            const fallbackBuffer = await fallback.arrayBuffer();
-            res.end(Buffer.from(fallbackBuffer));
+            await sendOk(fallback);
             return;
           }
-
-          const contentType = upstream.headers.get('content-type');
-          if (contentType) res.setHeader('content-type', contentType);
-          res.setHeader('cache-control', 'public, max-age=300');
-          res.statusCode = 200;
-
-          const arrayBuffer = await upstream.arrayBuffer();
-          res.end(Buffer.from(arrayBuffer));
+          await sendOk(upstream);
+          return;
         } catch (e) {
           res.statusCode = 500;
           res.end('Proxy error');

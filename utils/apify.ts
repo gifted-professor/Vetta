@@ -225,7 +225,13 @@ export const runApifyTask = async (
 
   // 2. Poll for completion
   let attempts = 0;
-  const maxAttempts = actorId.includes('instagram-search-scraper') ? 60 : 30; // 60 * 2s = 120s timeout
+  let succeeded = false;
+  const resultsType = String(payload?.resultsType || '').toLowerCase();
+  const maxAttempts = actorId.includes('instagram-search-scraper')
+    ? 60
+    : actorId.includes('instagram-scraper') && resultsType === 'details'
+      ? 90
+      : 45;
   
   while (attempts < maxAttempts) { 
     await abortableDelay(2000, signal);
@@ -253,6 +259,7 @@ export const runApifyTask = async (
         addLog(`Debug: Run ${runId} status: ${status} (${attempts}/${maxAttempts})`);
 
         if (status === 'SUCCEEDED') {
+          succeeded = true;
           break;
         } else if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
           throw new Error(`Task ended with status: ${status}`);
@@ -276,7 +283,7 @@ export const runApifyTask = async (
 
     // ... (rest of the file) ...
 
-  if (attempts >= maxAttempts) {
+  if (!succeeded) {
     throw new Error(`Task timed out after ${maxAttempts * 2}s`);
   }
 

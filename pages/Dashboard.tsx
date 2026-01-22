@@ -1,13 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
-  ScanSearch,
   History,
   Sparkles,
 } from 'lucide-react';
 
 import { translations } from '../locales/translations';
-import { SourcingStrategy, Candidate, AuditResult } from '../types';
+import { SourcingStrategy, Candidate, AuditResult, AuditDraft } from '../types';
 import { Header } from '../components/Header';
 import { LogViewer } from '../components/LogViewer';
 import { FilterPanel } from '../components/FilterPanel';
@@ -15,8 +14,9 @@ import { InputSection } from '../components/InputSection';
 import { StrategyMatrix } from '../components/StrategyMatrix';
 import { CandidateList } from '../components/CandidateList';
 import { AuditReport } from '../components/AuditReport';
+import { AuditReportShell } from '../components/AuditReportShell';
 
-import { abortApifyRun, fetchApifyLimits, fetchInstagramData, runApifyTask } from '../utils/apify';
+import { abortApifyRun, fetchApifyLimits, runApifyTask } from '../utils/apify';
 import { supabase } from '../supabase.client';
 import { useAuth } from '../auth';
 
@@ -76,6 +76,17 @@ export const Dashboard = () => {
     const c = localStorage.getItem('vetta_candidates');
     return c ? JSON.parse(c) : [];
   });
+
+  const isLikelyProfileAvatarUrl = (url: any) => {
+    const s = String(url || '');
+    if (!s) return false;
+    return /(t51\.2885-19|profile_pic|s150x150|p150x150)/i.test(s);
+  };
+
+  const candidatesRef = React.useRef<Candidate[]>([]);
+  React.useEffect(() => {
+    candidatesRef.current = candidates;
+  }, [candidates]);
   
   // Persistence effects
   React.useEffect(() => {
@@ -105,6 +116,8 @@ export const Dashboard = () => {
   
   const [url, setUrl] = useState('');
   const [brandProfile, setBrandProfile] = useState('');
+  const [auditSeedCandidate, setAuditSeedCandidate] = useState<Candidate | null>(null);
+  const [auditDraft, setAuditDraft] = useState<AuditDraft | null>(null);
   const [apifyToken, setApifyToken] = useState('');
   const [apifyQuota, setApifyQuota] = useState<{
     monthlyUsageUsd?: number;
@@ -256,16 +269,21 @@ export const Dashboard = () => {
         return text;
       })();
 
-      fetchPromise.catch(() => {});
-
+      let timeoutId: any;
       const timeoutPromise = new Promise<string>((_, reject) => {
-        const id = setTimeout(() => {
-          clearTimeout(id);
+        timeoutId = setTimeout(() => {
           reject(new Error(`Gemini request timed out after ${Math.round(timeoutMs / 1000)}s`));
         }, timeoutMs);
       });
 
-      return await Promise.race([fetchPromise, timeoutPromise]);
+      try {
+        const result = await Promise.race([fetchPromise, timeoutPromise]);
+        clearTimeout(timeoutId);
+        return result;
+      } catch (e) {
+        clearTimeout(timeoutId);
+        throw e;
+      }
     } catch (e: any) {
       throw e;
     }
@@ -637,6 +655,8 @@ Return JSON only.`));
       let hardLimitReached = false;
       const avatarEnriched = new Set<string>();
       const avatarEnrichInFlight = new Set<string>();
+      const avatarEnrichAttempts = new Map<string, number>();
+      let avatarEnrichLastAt = 0;
 
       const commercialBlacklist = [
         'daigou', 'price', 'wholesale', 'reseller', 'seller', 'sale', 'shop', 'store', 
@@ -817,12 +837,7 @@ Return JSON only.`));
               item.profilePicUrl ||
               item.profile_pic_url_hd ||
               item.ownerProfilePicUrl ||
-              item.owner_profile_pic_url ||
-              item.displayUrl ||
-              item.display_url ||
-              item.imageUrl ||
-              item.image_url ||
-              (Array.isArray(item.images) ? item.images[0] : null)
+              item.owner_profile_pic_url
           );
 
           const verified = !!(userObj.isVerified || userObj.is_verified || item.isVerified || item.is_verified);
@@ -849,66 +864,106 @@ Return JSON only.`));
       const gradients = ["from-indigo-500 to-purple-600", "from-pink-500 to-rose-500", "from-emerald-400 to-cyan-500", "from-amber-400 to-orange-500"];
 
       const enrichCandidateAvatars = async (list: any[]) => {
-        const needsProfilePic = (u: any) => {
-          const s = String(u?.avatar_url || '');
-          return !s || !/(t51\\.2885-19|profile_pic)/i.test(s);
-        };
+        const now = Date.now();
+        if (now - avatarEnrichLastAt < 8000) return;
+        avatarEnrichLastAt = now;
+        const needsProfilePic = (u: any) => !isLikelyProfileAvatarUrl(u?.avatar_url);
         const targets = list
-          .slice(0, 12)
-          .filter(needsProfilePic)
-          .filter((c) => c?.id && !avatarEnriched.has(c.id) && !avatarEnrichInFlight.has(c.id));
+          .slice(0, 18)
+          .filter((c) => c?.id && needsProfilePic(c))
+          .filter((c) => {
+            const key = String(c.id || '').toLowerCase().trim();
+            const n = avatarEnrichAttempts.get(key) || 0;
+            return n < 2;
+          })
+          .filter((c) => !avatarEnriched.has(c.id) && !avatarEnrichInFlight.has(c.id));
         if (targets.length === 0) return;
+        if (controller.signal.aborted) return;
+
         addLog(`Avatar Enrichment: probing ${targets.length} profiles for profile pictures...`);
-        const CONCURRENCY = 2;
-        for (let i = 0; i < targets.length; i += CONCURRENCY) {
-          if (controller.signal.aborted) break;
-          const chunk = targets.slice(i, i + CONCURRENCY);
-          await Promise.all(
-            chunk.map(async (c: any) => {
-              if (!c?.id) return;
-              avatarEnrichInFlight.add(c.id);
-              try {
-                await abortableDelay(Math.random() * 500, controller.signal);
-                const details = await runApifyTask(
-                  'apify~instagram-scraper',
-                  { directUrls: [`https://www.instagram.com/${c.id}/`], resultsType: 'details', resultsLimit: 1 },
-                  addLog,
-                  (info) => {
-                    const usd = typeof info.usageTotalUsd === 'number' ? info.usageTotalUsd : info.usageUsd;
-                    if (typeof usd === 'number') {
-                      setApifySpend((prev) => ({
-                        lastRunUsd: usd,
-                        sessionUsd: prev.sessionUsd + usd,
-                        runCount: prev.runCount + 1,
-                      }));
-                      refreshApifyQuota(false);
-                    }
-                  },
-                  { signal: controller.signal, onRunStarted: (runId) => activeApifyRunsRef.current.add(runId) }
-                );
-                const d0 = Array.isArray(details) ? details[0] : null;
-                const pic = sanitizeUrl(d0?.profilePicUrlHD || d0?.profilePicUrl);
-                if (!pic) return;
-                setCandidates((prev) => prev.map((x) => (x.id === c.id ? { ...x, avatar_url: pic } : x)));
-              } catch {}
-              finally {
-                avatarEnriched.add(c.id);
-                avatarEnrichInFlight.delete(c.id);
-              }
-            })
-          );
+        const BATCH = 6;
+        const take = targets.slice(0, BATCH * 2);
+        for (let i = 0; i < take.length; i += BATCH) {
+          if (controller.signal.aborted) return;
+          const batch = take.slice(i, i + BATCH);
+          batch.forEach((c) => {
+            avatarEnrichInFlight.add(c.id);
+            const key = String(c.id || '').toLowerCase().trim();
+            avatarEnrichAttempts.set(key, (avatarEnrichAttempts.get(key) || 0) + 1);
+          });
+
+          try {
+            await abortableDelay(Math.random() * 400, controller.signal);
+            const directUrls = batch.map((c) => `https://www.instagram.com/${c.id}/`);
+            const details = await runApifyTask(
+              'apify~instagram-scraper',
+              { directUrls, resultsType: 'details', resultsLimit: directUrls.length },
+              addLog,
+              (info) => {
+                const usd = typeof info.usageTotalUsd === 'number' ? info.usageTotalUsd : info.usageUsd;
+                if (typeof usd === 'number') {
+                  setApifySpend((prev) => ({
+                    lastRunUsd: usd,
+                    sessionUsd: prev.sessionUsd + usd,
+                    runCount: prev.runCount + 1,
+                  }));
+                  refreshApifyQuota(false);
+                }
+              },
+              { signal: controller.signal, onRunStarted: (runId) => activeApifyRunsRef.current.add(runId) }
+            );
+
+            const picByUsername = new Map<string, string>();
+            (Array.isArray(details) ? details : []).forEach((d: any) => {
+              const uname = String(d?.username || d?.userName || d?.handle || '').toLowerCase().trim();
+              const pic = sanitizeUrl(
+                d?.profilePicUrlHD || d?.profilePicUrl || d?.profile_pic_url_hd || d?.profile_pic_url
+              );
+              if (uname && pic) picByUsername.set(uname, pic);
+            });
+
+            if (picByUsername.size > 0) {
+              picByUsername.forEach((pic, uname) => {
+                const cur = uniqueMap.get(uname);
+                if (cur) cur.avatarUrl = pic;
+              });
+              setCandidates((prev) =>
+                prev.map((x) => {
+                  const uname = String(x?.id || '').toLowerCase().trim();
+                  const pic = picByUsername.get(uname);
+                  return pic ? { ...x, avatar_url: pic } : x;
+                })
+              );
+            }
+
+            batch.forEach((c) => {
+              const uname = String(c?.id || '').toLowerCase().trim();
+              if (picByUsername.has(uname)) avatarEnriched.add(c.id);
+            });
+          } catch (e: any) {
+            if (!controller.signal.aborted && !isAbortError(e)) addLog(`Avatar Enrichment failed: ${e?.message || 'unknown error'}`);
+          } finally {
+            batch.forEach((c) => avatarEnrichInFlight.delete(c.id));
+          }
         }
       };
 
       const publishCandidates = () => {
+        const prevById: Map<string, Candidate> = new Map(
+          (candidatesRef.current || [])
+            .map((c) => [String(c?.id || '').toLowerCase().trim(), c] as [string, Candidate])
+            .filter((x) => x[0].length > 0)
+        );
         const mapped = Array.from(uniqueMap.values()).map((u: any, idx: number) => {
+          const uname = String(u.username || '').toLowerCase().trim();
+          const prev = uname ? prevById.get(uname) : undefined;
           return {
             id: u.username,
             url: `https://www.instagram.com/${u.username}/`,
             match_score: u.match_score,
             niche: u.displayName,
             followers: u.followers,
-            avatar_url: u.avatarUrl,
+            avatar_url: u.avatarUrl || prev?.avatar_url,
             avatar_color: `bg-gradient-to-br ${gradients[idx % gradients.length]}`,
             is_verified: u.verified,
             match_reason: u.match_reason,
@@ -1319,6 +1374,9 @@ ${outputLanguageInstruction(lang)}`;
   const triggerDeepAudit = (candidate: Candidate) => {
     setUrl(candidate.url);
     setBrandProfile(productDesc || strategy?.core_tags.join(', ') || "Niche Influencer");
+    setAuditSeedCandidate(candidate);
+    setAuditDraft(null);
+    setResult(null);
     setMode('audit');
     addLog(`Penetrating: @${candidate.id}`);
   };
@@ -1340,10 +1398,20 @@ ${outputLanguageInstruction(lang)}`;
        setLoading(false);
        return;
     }
+
+    const prefillUsername = auditSeedCandidate?.id || targetUsername;
+    setAuditDraft({
+      profile: {
+        username: prefillUsername,
+        followers: typeof auditSeedCandidate?.followers === 'number' ? auditSeedCandidate.followers : undefined,
+        avatar_url: auditSeedCandidate?.avatar_url,
+        verified: auditSeedCandidate?.is_verified,
+      },
+    });
     
     try {
       const apifyRunUsdById = new Map<string, number>();
-      const igData = await fetchInstagramData(targetUsername, addLog, (info) => {
+      const onApifyRunFinished = (info: { actorId: string; runId: string; datasetId?: string; usageTotalUsd?: number; usageUsd?: number }) => {
         const usd = typeof info.usageTotalUsd === 'number' ? info.usageTotalUsd : info.usageUsd;
         if (info?.runId) apifyRunUsdById.set(info.runId, typeof usd === 'number' ? usd : 0);
         if (typeof usd === 'number') {
@@ -1355,14 +1423,156 @@ ${outputLanguageInstruction(lang)}`;
           addLog(`Apify cost: $${usd.toFixed(4)} (${info.runId})`);
           refreshApifyQuota(false);
         }
-      }, {
-        signal: controller.signal,
-        onRunStarted: (runId) => activeApifyRunsRef.current.add(runId),
-      });
-      
-      if (!igData) {
-         throw new Error("Failed to retrieve Instagram data");
+      };
+
+      const actorId = 'apify~instagram-scraper';
+      const profileUrl = `https://www.instagram.com/${targetUsername}/`;
+
+      addLog('Fetching profile details...');
+      const detailsResults = await runApifyTask(
+        actorId,
+        { directUrls: [profileUrl], resultsType: 'details', resultsLimit: 1 },
+        addLog,
+        onApifyRunFinished,
+        {
+          signal: controller.signal,
+          onRunStarted: (runId) => activeApifyRunsRef.current.add(runId),
+        }
+      );
+
+      const detailsFirst = Array.isArray(detailsResults) ? detailsResults[0] : null;
+      if (detailsFirst && (detailsFirst.error || detailsFirst.errorDescription)) {
+        addLog(`Apify Error: ${detailsFirst.error} - ${detailsFirst.errorDescription}`);
       }
+
+      const profile = detailsFirst || {};
+      const resolvedUsername = profile.username || targetUsername;
+      const resolvedFollowers = profile.followersCount || profile.followers_count;
+      const resolvedFollows = profile.followsCount || profile.follows_count;
+      const resolvedPostsCount = profile.postsCount || profile.posts_count;
+      const resolvedAvatarUrl = profile.profilePicUrlHD || profile.profilePicUrl;
+      const postsFromDetails = Array.isArray(profile?.latestPosts)
+        ? profile.latestPosts.map((item: any) => ({
+            caption: item.caption || item.text || '',
+            url: item.url || item.postUrl || '',
+            likesCount: item.likesCount || item.likes_count || 0,
+            commentsCount: item.commentsCount || item.comments_count || 0,
+            imageUrl: item.displayUrl || item.display_url || item.imageUrl || item.image_url,
+          }))
+        : [];
+
+      setAuditDraft((prev) => ({
+        ...prev,
+        profile: {
+          ...(prev?.profile || {}),
+          username: resolvedUsername,
+          followers: typeof resolvedFollowers === 'number' ? resolvedFollowers : prev?.profile?.followers,
+          follows: typeof resolvedFollows === 'number' ? resolvedFollows : prev?.profile?.follows,
+          posts: typeof resolvedPostsCount === 'number' ? resolvedPostsCount : prev?.profile?.posts,
+          verified: Boolean(profile.verified),
+          private: Boolean(profile.private),
+          is_business_account: Boolean(profile.isBusinessAccount),
+          business_category_name: profile.businessCategoryName ?? null,
+          external_url: profile.externalUrl,
+          avatar_url: resolvedAvatarUrl,
+        },
+      }));
+
+      if (postsFromDetails.length > 0) {
+        setAuditDraft((prev) => ({
+          ...prev,
+          recent_posts:
+            prev?.recent_posts?.length
+              ? prev.recent_posts
+              : postsFromDetails
+                  .filter((p: any) => p.imageUrl)
+                  .slice(0, 9)
+                  .map((p: any) => ({
+                    url: p.imageUrl,
+                    post_url: p.url,
+                    image_url: p.imageUrl,
+                    caption: p.caption ? p.caption.substring(0, 50) + '...' : '',
+                    likes: p.likesCount,
+                  })),
+        }));
+      }
+
+      addLog('Fetching profile posts...');
+      const postsResults = await runApifyTask(
+        actorId,
+        { directUrls: [profileUrl], resultsType: 'posts', resultsLimit: 12 },
+        addLog,
+        onApifyRunFinished,
+        {
+          signal: controller.signal,
+          onRunStarted: (runId) => activeApifyRunsRef.current.add(runId),
+        }
+      );
+      
+      if (postsResults && postsResults.length === 1 && (postsResults[0].error || postsResults[0].errorDescription)) {
+        const errItem = postsResults[0];
+        addLog(`Apify Error: ${errItem.error} - ${errItem.errorDescription}`);
+        if (errItem.error === 'no_items') {
+          addLog('Possible causes: Private account, Invalid username, or Geo-restriction.');
+        }
+      }
+
+      const postsFromPosts = Array.isArray(postsResults)
+        ? postsResults.map((item: any) => ({
+            caption: item.caption || item.text || '',
+            url: item.url || item.postUrl,
+            likesCount: item.likesCount || item.likes_count || 0,
+            commentsCount: item.commentsCount || item.comments_count || 0,
+            imageUrl: item.displayUrl || item.display_url || item.imageUrl || item.image_url,
+          }))
+        : [];
+
+      const posts = (postsFromPosts.length ? postsFromPosts : postsFromDetails).filter((p: any) => p.imageUrl);
+      if (!detailsFirst && posts.length === 0) {
+        throw new Error('Failed to retrieve Instagram data');
+      }
+
+      const followersCount = typeof resolvedFollowers === 'number' ? resolvedFollowers : 0;
+      const avgLikes = Math.floor(posts.reduce((acc: number, p: any) => acc + (p.likesCount || 0), 0) / (posts.length || 1));
+      const engagementRate =
+        ((posts.reduce((acc: number, p: any) => acc + (p.likesCount || 0) + (p.commentsCount || 0), 0) / (posts.length || 1)) / (followersCount || 1) * 100).toFixed(2) + '%';
+
+      setAuditDraft((prev) => ({
+        ...prev,
+        recent_posts: posts.slice(0, 9).map((p: any) => ({
+          url: p.imageUrl,
+          post_url: p.url,
+          image_url: p.imageUrl,
+          caption: p.caption ? p.caption.substring(0, 50) + '...' : '',
+          likes: p.likesCount,
+        })),
+        profile: {
+          ...(prev?.profile || {}),
+          followers: typeof resolvedFollowers === 'number' ? resolvedFollowers : prev?.profile?.followers,
+          avg_likes: avgLikes,
+          engagement_rate: engagementRate,
+        },
+      }));
+
+      const igData = {
+        username: resolvedUsername,
+        fullName: profile.fullName || profile.full_name,
+        biography: profile.biography || profile.bio || 'No bio available',
+        followersCount,
+        followsCount: resolvedFollows,
+        postsCount: resolvedPostsCount,
+        profileUrl: profile.url || profile.profileUrl || profileUrl,
+        profileId: profile.id || profile.profileId,
+        verified: Boolean(profile.verified),
+        private: Boolean(profile.private),
+        isBusinessAccount: Boolean(profile.isBusinessAccount),
+        businessCategoryName: profile.businessCategoryName ?? null,
+        externalUrl: profile.externalUrl,
+        externalUrls: Array.isArray(profile.externalUrls) ? profile.externalUrls : [],
+        profilePicUrl: profile.profilePicUrl,
+        profilePicUrlHD: profile.profilePicUrlHD,
+        posts,
+      };
 
       addLog(`Data Retrieved: ${igData.posts.length} posts ready for Gemini analysis.`);
 
@@ -1603,7 +1813,12 @@ ${outputLanguageInstruction(lang)}`;
             productDesc={productDesc}
             setProductDesc={setProductDesc}
             url={url}
-            setUrl={setUrl}
+            setUrl={(next) => {
+              setUrl(next);
+              setAuditSeedCandidate(null);
+              setAuditDraft(null);
+              setResult(null);
+            }}
             brandProfile={brandProfile}
             setBrandProfile={setBrandProfile}
             loading={loading}
@@ -1678,16 +1893,14 @@ ${outputLanguageInstruction(lang)}`;
 
           {mode === 'audit' && result && <AuditReport lang={lang} result={result} />}
 
-          {!result && mode === 'audit' && !loading && (
-            <div className="bg-white h-[600px] border-2 border-dashed border-slate-200 rounded-[3rem] flex flex-col items-center justify-center text-slate-200 shadow-sm">
-              <ScanSearch size={64} className="mb-6 opacity-10" />
-              <h3 className="text-slate-800 font-black text-xl uppercase tracking-widest">
-                Awaiting Target URL
-              </h3>
-              <p className="text-slate-400 mt-4 font-bold text-sm text-center max-w-xs">
-                Run a discovery scan or paste a link to initiate Gemini 3.0 deep penetration.
-              </p>
-            </div>
+          {mode === 'audit' && !result && (
+            <AuditReportShell
+              lang={lang}
+              url={url}
+              loading={loading}
+              seedCandidate={auditSeedCandidate}
+              draft={auditDraft}
+            />
           )}
 
           {mode === 'discovery' && !strategy && !loading && (
