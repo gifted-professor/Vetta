@@ -106,12 +106,31 @@ export const AuditReport: React.FC<AuditReportProps> = ({ lang, result }) => {
         {/* Visual Wall */}
         <div className="grid grid-cols-3 gap-4 mb-10 relative z-10">
           {result.recent_posts?.map((p, i) => (
-            <div key={i} className="aspect-square rounded-2xl overflow-hidden bg-slate-100 relative group shadow-inner">
-              {p.url ? (
+            <a
+              key={i}
+              href={p.post_url || p.url || '#'}
+              target="_blank"
+              rel="noreferrer"
+              className="aspect-square rounded-2xl overflow-hidden bg-slate-100 relative group shadow-inner block"
+            >
+              {(p.image_url || p.url) ? (
                 <img 
-                  src={`/api/image?url=${encodeURIComponent(p.url)}`} 
+                  src={`/api/image?url=${encodeURIComponent(p.image_url || p.url || '')}`} 
                   className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
-                  onError={(e) => e.currentTarget.style.display = 'none'}
+                  onError={(e) => {
+                    const img = e.currentTarget;
+                    const raw = p.image_url || p.url;
+                    if (!raw) {
+                      img.style.display = 'none';
+                      return;
+                    }
+                    if (img.dataset.fallback !== '1') {
+                      img.dataset.fallback = '1';
+                      img.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(raw)}`;
+                      return;
+                    }
+                    img.style.display = 'none';
+                  }}
                 />
               ) : (
                 <div className="w-full h-full flex flex-col items-center justify-center text-slate-300 bg-slate-50">
@@ -124,7 +143,7 @@ export const AuditReport: React.FC<AuditReportProps> = ({ lang, result }) => {
                   {p.caption}
                 </p>
               </div>
-            </div>
+            </a>
           ))}
         </div>
 

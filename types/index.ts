@@ -47,7 +47,9 @@ export interface AuditResult {
   
   // For visual wall
   recent_posts: Array<{
-    url: string;
+    url?: string;
+    post_url?: string;
+    image_url?: string;
     caption: string;
     likes: number;
   }>;

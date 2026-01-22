@@ -552,25 +552,8 @@ Return JSON only.`));
       for (const p of imageQueue) {
          if (!p.imageUrl) continue;
          try {
-           // Fallback 1: Local Proxy
-           let proxyUrl = `/api/image?url=${encodeURIComponent(p.imageUrl)}`;
-           
-           // Fallback 2: Public CORS Proxy (High Availability)
-           // If local proxy fails (which is common for Instagram CDN), switch to allorigins.win
-           // Note: We use a small timeout for the local proxy to fail fast
-           const controller = new AbortController();
-           const timeoutId = setTimeout(() => controller.abort(), 3000); 
-
-           let res;
-           try {
-             res = await fetch(proxyUrl, { signal: controller.signal });
-             clearTimeout(timeoutId);
-             if (!res.ok) throw new Error('Local proxy failed');
-           } catch (e) {
-             // Switch to public proxy
-             proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(p.imageUrl)}`;
-             res = await fetch(proxyUrl);
-           }
+           const proxyUrl = `/api/image?url=${encodeURIComponent(p.imageUrl)}`;
+           const res = await fetch(proxyUrl);
 
            if (!res.ok) continue;
            
@@ -636,8 +619,10 @@ Return JSON only.`));
           ai_cost: Number(aiCost.toFixed(4)),
           total_cny: Number((apifyCost + aiCost).toFixed(4))
         },
-        recent_posts: igData.posts.slice(0, 3).map((p: any) => ({
+        recent_posts: igData.posts.slice(0, 9).map((p: any) => ({
           url: p.imageUrl,
+          post_url: p.url,
+          image_url: p.imageUrl,
           caption: p.caption ? p.caption.substring(0, 50) + '...' : '',
           likes: p.likesCount
         })),
