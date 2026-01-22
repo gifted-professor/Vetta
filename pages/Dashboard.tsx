@@ -39,7 +39,13 @@ export const Dashboard = () => {
   const [creditsModalDetail, setCreditsModalDetail] = useState<string | null>(null);
   
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut({ scope: 'global' });
+    } catch {
+      try {
+        await supabase.auth.signOut({ scope: 'local' });
+      } catch {}
+    }
     navigate('/login');
   };
 
