@@ -40,13 +40,10 @@ export const Dashboard = () => {
   
   const handleLogout = async () => {
     try {
-      await supabase.auth.signOut({ scope: 'global' });
-    } catch {
-      try {
-        await supabase.auth.signOut({ scope: 'local' });
-      } catch {}
+      await supabase.auth.signOut({ scope: 'local' });
+    } finally {
+      navigate('/login');
     }
-    navigate('/login');
   };
 
   const openCreditsModal = () => setCreditsModalOpen(true);
