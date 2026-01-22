@@ -5,5 +5,13 @@ const supabaseUrl = env.VITE_SUPABASE_URL;
 const supabaseAnonKey = env.VITE_SUPABASE_ANON_KEY;
 
 export const supabaseReady = Boolean(supabaseUrl && supabaseAnonKey);
+export const supabaseProjectRef = (() => {
+  try {
+    if (!supabaseUrl) return null;
+    return new URL(supabaseUrl).hostname.split('.')[0] || null;
+  } catch {
+    return null;
+  }
+})();
 
 export const supabase = createClient(supabaseUrl || 'http://localhost:54321', supabaseAnonKey || 'anon');

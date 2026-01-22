@@ -1,6 +1,6 @@
 import React from 'react';
 import type { Session, User } from '@supabase/supabase-js';
-import { supabase, supabaseReady } from './supabase.client';
+import { supabase, supabaseProjectRef, supabaseReady } from './supabase.client';
 
 type Profile = {
   credits: number;
@@ -16,6 +16,7 @@ type AuthContextValue = {
   error: string | null;
   refreshProfile: () => Promise<void>;
   deductCredits: () => Promise<{ ok: boolean; error?: string }>;
+  signOut: () => void;
 };
 
 const AuthContext = React.createContext<AuthContextValue | null>(null);
@@ -165,6 +166,22 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   }, []);
 
+  const signOut = React.useCallback(() => {
+    try {
+      const ref = supabaseProjectRef;
+      if (ref && typeof window !== 'undefined' && window.localStorage) {
+        const prefix = `sb-${ref}-`;
+        const keys = Object.keys(window.localStorage);
+        keys.forEach(k => {
+          if (k.startsWith(prefix)) window.localStorage.removeItem(k);
+        });
+      }
+    } catch {}
+    setSession(null);
+    setUser(null);
+    setProfile(null);
+  }, []);
+
   const value: AuthContextValue = {
     session,
     user,
@@ -174,6 +191,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     error,
     refreshProfile,
     deductCredits,
+    signOut,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

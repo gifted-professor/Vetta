@@ -17,12 +17,11 @@ import { AuditReport } from '../components/AuditReport';
 import { AuditReportShell } from '../components/AuditReportShell';
 
 import { abortApifyRun, fetchApifyLimits, runApifyTask } from '../utils/apify';
-import { supabase } from '../supabase.client';
 import { useAuth } from '../auth';
 
 export const Dashboard = () => {
   const navigate = useNavigate();
-  const { user, profile, profileLoading, error: authError, deductCredits } = useAuth();
+  const { user, profile, profileLoading, error: authError, deductCredits, signOut } = useAuth();
   const [lang, setLang] = useState<'zh' | 'en'>(() => {
     const saved = localStorage.getItem('vetta_lang');
     if (saved === 'zh' || saved === 'en') return saved;
@@ -39,11 +38,8 @@ export const Dashboard = () => {
   const [creditsModalDetail, setCreditsModalDetail] = useState<string | null>(null);
   
   const handleLogout = async () => {
-    try {
-      await supabase.auth.signOut({ scope: 'local' });
-    } finally {
-      navigate('/login');
-    }
+    signOut();
+    navigate('/login');
   };
 
   const openCreditsModal = () => setCreditsModalOpen(true);
