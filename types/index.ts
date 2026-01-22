@@ -47,6 +47,28 @@ export interface AuditResult {
   visual_analysis: string;
   niche_category: string;
   risk_factors: string[]; // New: List of red flags
+
+  _localized?: {
+    base?: 'zh' | 'en';
+    zh?: {
+      style_tags: string[];
+      audit_reason: string;
+      personalized_greeting: string;
+      engagement_analysis: string;
+      visual_analysis: string;
+      niche_category: string;
+      risk_factors: string[];
+    };
+    en?: {
+      style_tags: string[];
+      audit_reason: string;
+      personalized_greeting: string;
+      engagement_analysis: string;
+      visual_analysis: string;
+      niche_category: string;
+      risk_factors: string[];
+    };
+  };
   
   // New V3.1 UI Fields
   cost_estimation: {
@@ -70,5 +92,13 @@ export interface AuditResult {
     followers: number;
     avg_likes: number;
     engagement_rate: string;
+    avatar_url?: string;
+    verified?: boolean;
+    private?: boolean;
+    is_business_account?: boolean;
+    business_category_name?: string | null;
+    follows?: number;
+    posts?: number;
+    external_url?: string;
   };
 }

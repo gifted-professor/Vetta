@@ -11,6 +11,18 @@ export interface InstagramData {
   fullName?: string;
   biography?: string;
   followersCount?: number;
+  followsCount?: number;
+  postsCount?: number;
+  profileUrl?: string;
+  profileId?: string;
+  verified?: boolean;
+  private?: boolean;
+  isBusinessAccount?: boolean;
+  businessCategoryName?: string | null;
+  externalUrl?: string;
+  externalUrls?: Array<{ title?: string; url?: string; lynx_url?: string; link_type?: string }>;
+  profilePicUrl?: string;
+  profilePicUrlHD?: string;
   posts: Array<{
     caption: string;
     url: string;
@@ -133,25 +145,32 @@ export const fetchApifyLimits = async (): Promise<ApifyLimitsSummary | null> => 
   };
 };
 
-export const fetchApifyRunUsage = async (runId: string): Promise<ApifyRunUsageSummary | null> => {
+export const fetchApifyRunUsage = async (runId: string, signal?: AbortSignal): Promise<ApifyRunUsageSummary | null> => {
   if (!runId) return null;
 
   const baseUrl = '/api/apify';
-  const res = await fetch(`${baseUrl}/actor-runs/${runId}`, {
-    headers: {
-      'Content-Type': 'application/json',
-    },
-  });
+  for (let attempt = 0; attempt < 6; attempt++) {
+    if (signal?.aborted) throw createAbortError();
+    const res = await fetch(`${baseUrl}/actor-runs/${runId}`, {
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      signal,
+    });
 
-  if (!res.ok) return null;
-  const json = await res.json();
-  const data = json?.data ?? json;
+    if (!res.ok) return null;
+    const json = await res.json();
+    const data = json?.data ?? json;
 
-  return {
-    runId,
-    usageUsd: extractNumber(data?.usageUsd) ?? extractNumber(data?.usage?.usageUsd),
-    usageTotalUsd: extractNumber(data?.usageTotalUsd) ?? extractNumber(data?.usage?.usageTotalUsd),
-  };
+    const usageUsd = extractNumber(data?.usageUsd) ?? extractNumber(data?.usage?.usageUsd);
+    const usageTotalUsd = extractNumber(data?.usageTotalUsd) ?? extractNumber(data?.usage?.usageTotalUsd);
+    if (typeof usageTotalUsd === 'number' && usageTotalUsd > 0) {
+      return { runId, usageUsd, usageTotalUsd };
+    }
+    if (attempt >= 5) return { runId, usageUsd, usageTotalUsd };
+    await abortableDelay(2000, signal);
+  }
+  return null;
 };
 
 export const abortApifyRun = async (runId: string): Promise<boolean> => {
@@ -274,7 +293,7 @@ export const runApifyTask = async (
   const finalJson = await resultsRes.json();
   addLog(`Debug: Dataset fetched. Items: ${Array.isArray(finalJson) ? finalJson.length : 'Not Array'}`);
   if (onRunFinished) {
-    const usage = await fetchApifyRunUsage(runId);
+    const usage = await fetchApifyRunUsage(runId, signal);
     onRunFinished({
       actorId,
       runId,
@@ -290,61 +309,95 @@ export const fetchInstagramData = async (
   username: string,
   addLog: (msg: string) => void,
   onRunFinished?: (info: { actorId: string; runId: string; datasetId?: string; usageTotalUsd?: number; usageUsd?: number }) => void,
-  control?: ApifyTaskControl
+  control?: ApifyTaskControl,
+  opts?: { postsLimit?: number }
 ): Promise<InstagramData | null> => {
   // Use the robust runApifyTask instead of fragile sync call
   const actorId = 'apify~instagram-scraper'; 
   
   addLog(`Connecting to Apify (${actorId})...`);
 
-  // Try directUrls first as it's more reliable for some profiles
-  const payload = {
-    directUrls: [`https://www.instagram.com/${username}/`],
-    resultsLimit: 12,
-    // searchType: 'details', // Removed: Not supported by apify~instagram-scraper in this mode
-    // proxy: { useApifyProxy: true }, // Removed: Let Apify handle proxy rotation automatically to avoid stuck sessions
-    resultsType: 'posts' // Ensure we get posts data
-  };
+  const profileUrl = `https://www.instagram.com/${username}/`;
+  const postsLimit = typeof opts?.postsLimit === 'number' ? opts?.postsLimit : 12;
 
   try {
-    const results = await runApifyTask(actorId, payload, addLog, onRunFinished, control);
+    addLog('Fetching profile details...');
+    const detailsResults = await runApifyTask(
+      actorId,
+      { directUrls: [profileUrl], resultsType: 'details', resultsLimit: 1 },
+      addLog,
+      onRunFinished,
+      control
+    );
+    const detailsFirst = Array.isArray(detailsResults) ? detailsResults[0] : null;
+    if (detailsFirst && (detailsFirst.error || detailsFirst.errorDescription)) {
+      const errItem = detailsFirst;
+      addLog(`Apify Error: ${errItem.error} - ${errItem.errorDescription}`);
+    }
+
+    addLog('Fetching profile posts...');
+    const postsResults = await runApifyTask(
+      actorId,
+      { directUrls: [profileUrl], resultsType: 'posts', resultsLimit: postsLimit },
+      addLog,
+      onRunFinished,
+      control
+    );
     
     // Check for specific error object returned by Apify
-    if (results && results.length === 1 && (results[0].error || results[0].errorDescription)) {
-       const errItem = results[0];
+    if (postsResults && postsResults.length === 1 && (postsResults[0].error || postsResults[0].errorDescription)) {
+       const errItem = postsResults[0];
        addLog(`Apify Error: ${errItem.error} - ${errItem.errorDescription}`);
        if (errItem.error === 'no_items') {
           addLog("Possible causes: Private account, Invalid username, or Geo-restriction.");
        }
-       return null;
+       if (!detailsFirst) return null;
     }
 
-    if (!results || results.length === 0) {
-      addLog('No data found for this user.');
-      return null;
-    }
+    const postsFromDetails = Array.isArray(detailsFirst?.latestPosts)
+      ? detailsFirst.latestPosts.map((item: any) => ({
+          caption: item.caption || item.text || '',
+          url: item.url || item.postUrl || '',
+          likesCount: item.likesCount || item.likes_count || 0,
+          commentsCount: item.commentsCount || item.comments_count || 0,
+          imageUrl: item.displayUrl || item.display_url || item.imageUrl || item.image_url,
+        }))
+      : [];
 
-    // 聚合数据
-    const posts = results.map((item: any) => ({
-      caption: item.caption || item.text || '',
-      url: item.url || item.postUrl,
-      likesCount: item.likesCount || item.likes_count || 0,
-      commentsCount: item.commentsCount || item.comments_count || 0,
-      imageUrl: item.displayUrl || item.display_url || item.imageUrl
-    })).filter(p => p.imageUrl); // Only keep posts with images
+    const postsFromPosts = Array.isArray(postsResults)
+      ? postsResults.map((item: any) => ({
+          caption: item.caption || item.text || '',
+          url: item.url || item.postUrl,
+          likesCount: item.likesCount || item.likes_count || 0,
+          commentsCount: item.commentsCount || item.comments_count || 0,
+          imageUrl: item.displayUrl || item.display_url || item.imageUrl || item.image_url,
+        }))
+      : [];
 
-    // 从第一条数据中提取用户信息
-    const firstItem = results[0];
-    const owner = firstItem.owner || {};
+    const posts = (postsFromPosts.length ? postsFromPosts : postsFromDetails).filter((p: any) => p.imageUrl);
+
+    const profile = detailsFirst || {};
 
     addLog(`Successfully scraped ${posts.length} posts for analysis.`);
 
     return {
-      username: owner.username || username,
-      fullName: owner.fullName || owner.full_name,
-      biography: owner.biography || owner.bio || "No bio available (Scraped from posts)",
-      followersCount: owner.followersCount || owner.followers_count || 0,
-      posts
+      username: profile.username || username,
+      fullName: profile.fullName || profile.full_name,
+      biography: profile.biography || profile.bio || 'No bio available',
+      followersCount: profile.followersCount || profile.followers_count || 0,
+      followsCount: profile.followsCount || profile.follows_count,
+      postsCount: profile.postsCount || profile.posts_count,
+      profileUrl: profile.url || profile.profileUrl || profileUrl,
+      profileId: profile.id || profile.profileId,
+      verified: Boolean(profile.verified),
+      private: Boolean(profile.private),
+      isBusinessAccount: Boolean(profile.isBusinessAccount),
+      businessCategoryName: profile.businessCategoryName ?? null,
+      externalUrl: profile.externalUrl,
+      externalUrls: Array.isArray(profile.externalUrls) ? profile.externalUrls : [],
+      profilePicUrl: profile.profilePicUrl,
+      profilePicUrlHD: profile.profilePicUrlHD,
+      posts,
     };
 
   } catch (error: any) {

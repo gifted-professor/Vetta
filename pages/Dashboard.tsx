@@ -23,7 +23,14 @@ import { useAuth } from '../auth';
 export const Dashboard = () => {
   const navigate = useNavigate();
   const { user, profile, profileLoading, error: authError, deductCredits } = useAuth();
-  const [lang, setLang] = useState<'zh' | 'en'>('zh');
+  const [lang, setLang] = useState<'zh' | 'en'>(() => {
+    const saved = localStorage.getItem('vetta_lang');
+    if (saved === 'zh' || saved === 'en') return saved;
+    const nav = String(navigator.language || '').toLowerCase();
+    if (nav.startsWith('zh')) return 'zh';
+    if (nav.startsWith('en')) return 'en';
+    return 'zh';
+  });
   const t = translations[lang];
   const [mode, setMode] = useState<'discovery' | 'audit'>('discovery');
   const hasApifyToken = Boolean(process.env.VETTA_HAS_APIFY_TOKEN);
@@ -72,6 +79,10 @@ export const Dashboard = () => {
   
   // Persistence effects
   React.useEffect(() => {
+    localStorage.setItem('vetta_lang', lang);
+  }, [lang]);
+
+  React.useEffect(() => {
     if (productImg) localStorage.setItem('vetta_productImg', productImg);
     else localStorage.removeItem('vetta_productImg');
   }, [productImg]);
@@ -100,6 +111,7 @@ export const Dashboard = () => {
     maxMonthlyUsageUsd?: number;
     updatedAt?: number;
     error?: string;
+    loading?: boolean;
   }>({});
   const [apifySpend, setApifySpend] = useState<{
     lastRunUsd?: number;
@@ -122,6 +134,10 @@ export const Dashboard = () => {
   const [result, setResult] = useState<AuditResult | null>(null);
   const taskControllerRef = React.useRef<AbortController | null>(null);
   const activeApifyRunsRef = React.useRef(new Set<string>());
+  const auditTranslateAbortRef = React.useRef<AbortController | null>(null);
+  const auditTranslateInFlightRef = React.useRef<{ zh: boolean; en: boolean }>({ zh: false, en: false });
+  const auditTranslateTokenRef = React.useRef<{ zh: number; en: number }>({ zh: 0, en: 0 });
+  const [auditTranslateBusy, setAuditTranslateBusy] = useState<{ zh: boolean; en: boolean }>({ zh: false, en: false });
 
   const addLog = (msg: string) => {
     setLogs(prev => {
@@ -185,25 +201,26 @@ export const Dashboard = () => {
     apifyQuotaLastFetchRef.current = now;
 
     try {
-      setApifyQuota(prev => ({ ...prev, error: undefined }));
+      setApifyQuota(prev => ({ ...prev, loading: true, error: undefined }));
       const limits = await fetchApifyLimits();
       if (!limits) {
-        setApifyQuota(prev => ({ ...prev, updatedAt: Date.now(), error: 'fetch_failed' }));
+        setApifyQuota(prev => ({ ...prev, loading: false, updatedAt: Date.now(), error: 'fetch_failed' }));
         return;
       }
       setApifyQuota({
         monthlyUsageUsd: limits.monthlyUsageUsd,
         maxMonthlyUsageUsd: limits.maxMonthlyUsageUsd,
         updatedAt: Date.now(),
+        loading: false,
       });
     } catch (e: any) {
-      setApifyQuota(prev => ({ ...prev, updatedAt: Date.now(), error: e?.message || 'fetch_failed' }));
+      setApifyQuota(prev => ({ ...prev, loading: false, updatedAt: Date.now(), error: e?.message || 'fetch_failed' }));
     }
   }, [hasApifyToken]);
 
   React.useEffect(() => {
     setApifySpend({ sessionUsd: 0, runCount: 0 });
-    setApifyQuota({});
+    setApifyQuota({ loading: false });
     if (!hasApifyToken) return;
     const id = setTimeout(() => {
       refreshApifyQuota(true);
@@ -214,42 +231,43 @@ export const Dashboard = () => {
   const geminiGenerateJson = async (parts: any[], signal?: AbortSignal, timeoutMs: number = 35000) => {
     if (!hasGeminiKey) throw new Error('Missing Gemini API key');
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    const onAbort = () => controller.abort();
-    if (signal) signal.addEventListener('abort', onAbort, { once: true });
-
     const url = `/api/gemini/v1beta/models/gemini-3-pro-preview:generateContent`;
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts }],
-          generationConfig: { responseMimeType: 'application/json' },
-        }),
-        signal: controller.signal,
+      const fetchPromise = (async () => {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts }],
+            generationConfig: { responseMimeType: 'application/json' },
+          }),
+          signal,
+        });
+
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(errText || `Gemini HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        const text =
+          data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('') || '';
+        if (!text) throw new Error('Empty Gemini response');
+        return text;
+      })();
+
+      fetchPromise.catch(() => {});
+
+      const timeoutPromise = new Promise<string>((_, reject) => {
+        const id = setTimeout(() => {
+          clearTimeout(id);
+          reject(new Error(`Gemini request timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
       });
 
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(errText || `Gemini HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      const text =
-        data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('') || '';
-      if (!text) throw new Error('Empty Gemini response');
-      return text;
+      return await Promise.race([fetchPromise, timeoutPromise]);
     } catch (e: any) {
-      if (controller.signal.aborted) {
-        if (signal?.aborted) throw e;
-        throw new Error(`Gemini request timed out after ${Math.round(timeoutMs / 1000)}s`);
-      }
       throw e;
-    } finally {
-      clearTimeout(timeoutId);
-      if (signal) signal.removeEventListener('abort', onAbort);
     }
   };
 
@@ -262,6 +280,223 @@ export const Dashboard = () => {
       .filter(s => s.length > 2)
       .slice(0, 8); // Top 8
   };
+
+  const outputLanguageInstruction = (lang: 'zh' | 'en') => {
+    const target = lang === 'zh' ? 'Simplified Chinese (简体中文)' : 'English';
+    const notes =
+      lang === 'zh'
+        ? `- All user-facing strings MUST be in Simplified Chinese.\n- Do NOT use English unless it is a proper noun (e.g., @username, model numbers, brand names, place names).\n`
+        : `- All user-facing strings MUST be in English.\n`;
+    return `\nOutput language:\n- Target language: ${target}\n${notes}- Return STRICT JSON only. No Markdown, no backticks.\n- Keep JSON keys exactly as specified in the schema.\n`;
+  };
+
+  const countMatches = (s: string, re: RegExp) => {
+    const m = s.match(re);
+    return m ? m.length : 0;
+  };
+
+  const isMostlyEnglishText = (v: any) => {
+    const s = String(v || '').trim();
+    if (!s) return false;
+    const cjk = countMatches(s, /[\u4E00-\u9FFF]/g);
+    const latin = countMatches(s, /[A-Za-z]/g);
+    return latin >= 20 && cjk === 0;
+  };
+
+  const isMostlyChineseText = (v: any) => {
+    const s = String(v || '').trim();
+    if (!s) return false;
+    const cjk = countMatches(s, /[\u4E00-\u9FFF]/g);
+    const latin = countMatches(s, /[A-Za-z]/g);
+    if (cjk < 8) return false;
+    return cjk >= latin * 2;
+  };
+
+  const shouldTranslateAuditToZh = (r: any) => {
+    if (!r) return false;
+    const singleFields = ['audit_reason', 'personalized_greeting', 'engagement_analysis', 'visual_analysis', 'niche_category'];
+    if (singleFields.some((k) => isMostlyEnglishText(r?.[k]))) return true;
+    if (Array.isArray(r?.risk_factors) && r.risk_factors.some((x: any) => isMostlyEnglishText(x))) return true;
+    if (Array.isArray(r?.style_tags) && r.style_tags.some((x: any) => isMostlyEnglishText(x))) return true;
+    return false;
+  };
+
+  const shouldTranslateAuditToEn = (r: any) => {
+    if (!r) return false;
+    const singleFields = ['audit_reason', 'personalized_greeting', 'engagement_analysis', 'visual_analysis', 'niche_category'];
+    if (singleFields.some((k) => isMostlyChineseText(r?.[k]))) return true;
+    if (Array.isArray(r?.risk_factors) && r.risk_factors.some((x: any) => isMostlyChineseText(x))) return true;
+    if (Array.isArray(r?.style_tags) && r.style_tags.some((x: any) => isMostlyChineseText(x))) return true;
+    return false;
+  };
+
+  const getAuditTranslationInput = (r: any) => ({
+    style_tags: Array.isArray(r?.style_tags) ? r.style_tags : [],
+    audit_reason: typeof r?.audit_reason === 'string' ? r.audit_reason : '',
+    personalized_greeting: typeof r?.personalized_greeting === 'string' ? r.personalized_greeting : '',
+    engagement_analysis: typeof r?.engagement_analysis === 'string' ? r.engagement_analysis : '',
+    visual_analysis: typeof r?.visual_analysis === 'string' ? r.visual_analysis : '',
+    niche_category: typeof r?.niche_category === 'string' ? r.niche_category : '',
+    risk_factors: Array.isArray(r?.risk_factors) ? r.risk_factors : [],
+  });
+
+  const translateAuditFieldsToZh = async (r: any, signal: AbortSignal) => {
+    const input = getAuditTranslationInput(r);
+    const prompt = `Role: Professional translator.
+Task: Translate the JSON values to Simplified Chinese (简体中文).
+Rules:
+- Keep the JSON keys and structure identical.
+- Preserve proper nouns (e.g., @username, model numbers, brand names, place names) without translating them.
+- Do not add or remove items. Keep arrays the same length.
+- Output STRICT JSON only.
+
+Input JSON:
+${JSON.stringify(input)}`;
+    const text = await geminiGenerateJson([{ text: prompt }], signal, 35000);
+    return JSON.parse(text || '{}');
+  };
+
+  const translateAuditFieldsToEn = async (r: any, signal: AbortSignal) => {
+    const input = getAuditTranslationInput(r);
+    const prompt = `Role: Professional translator.
+Task: Translate the JSON values to English.
+Rules:
+- Keep the JSON keys and structure identical.
+- Preserve proper nouns (e.g., @username, model numbers, brand names, place names) without translating them.
+- Do not add or remove items. Keep arrays the same length.
+- Output STRICT JSON only.
+
+Input JSON:
+${JSON.stringify(input)}`;
+    const text = await geminiGenerateJson([{ text: prompt }], signal, 35000);
+    return JSON.parse(text || '{}');
+  };
+
+  const translateAuditResultToZh = async (r: any, signal: AbortSignal) => {
+    const translated = await translateAuditFieldsToZh(r, signal);
+    return { ...r, ...translated };
+  };
+
+  const translateAuditResultToEn = async (r: any, signal: AbortSignal) => {
+    const translated = await translateAuditFieldsToEn(r, signal);
+    return { ...r, ...translated };
+  };
+
+  const extractAuditLocalizedFields = (r: any) => ({
+    style_tags: Array.isArray(r?.style_tags) ? r.style_tags.map((x: any) => String(x || '')).filter(Boolean) : [],
+    audit_reason: typeof r?.audit_reason === 'string' ? r.audit_reason : '',
+    personalized_greeting: typeof r?.personalized_greeting === 'string' ? r.personalized_greeting : '',
+    engagement_analysis: typeof r?.engagement_analysis === 'string' ? r.engagement_analysis : '',
+    visual_analysis: typeof r?.visual_analysis === 'string' ? r.visual_analysis : '',
+    niche_category: typeof r?.niche_category === 'string' ? r.niche_category : '',
+    risk_factors: Array.isArray(r?.risk_factors) ? r.risk_factors.map((x: any) => String(x || '')).filter(Boolean) : [],
+  });
+
+  React.useEffect(() => {
+    if (!result) return;
+
+    const locale = lang;
+    const localized = result._localized;
+    const base = localized?.base;
+    const hasLocaleFields = Boolean(localized && (localized as any)[locale]);
+
+    if (!base || !localized) {
+      setResult((prev) => {
+        if (!prev) return prev;
+        const fields = extractAuditLocalizedFields(prev);
+        return {
+          ...prev,
+          _localized: {
+            base: locale,
+            [locale]: fields,
+          },
+        };
+      });
+      return;
+    }
+
+    if (hasLocaleFields) return;
+
+    if (base === locale) {
+      setResult((prev) => {
+        if (!prev) return prev;
+        const fields = extractAuditLocalizedFields(prev);
+        return {
+          ...prev,
+          _localized: {
+            ...(prev._localized || {}),
+            base,
+            [locale]: fields,
+          },
+        };
+      });
+      return;
+    }
+
+    const needsTranslate = locale === 'zh' ? shouldTranslateAuditToZh(result) : shouldTranslateAuditToEn(result);
+    if (!needsTranslate) {
+      setResult((prev) => {
+        if (!prev) return prev;
+        const fields = extractAuditLocalizedFields(prev);
+        return {
+          ...prev,
+          _localized: {
+            ...(prev._localized || {}),
+            base,
+            [locale]: fields,
+          },
+        };
+      });
+      return;
+    }
+
+    if (!hasGeminiKey) return;
+    if (auditTranslateInFlightRef.current[locale]) return;
+
+    auditTranslateAbortRef.current?.abort();
+    const controller = new AbortController();
+    auditTranslateAbortRef.current = controller;
+    auditTranslateInFlightRef.current[locale] = true;
+    auditTranslateTokenRef.current[locale] += 1;
+    const token = auditTranslateTokenRef.current[locale];
+    setAuditTranslateBusy((prev) => ({ ...prev, [locale]: true }));
+
+    addLog(locale === 'zh' ? '语言已切换：正在将审计结果翻译为中文...' : 'Language switched: translating audit result to English...');
+
+    (async () => {
+      try {
+        const translated =
+          locale === 'zh'
+            ? await translateAuditFieldsToZh(result, controller.signal)
+            : await translateAuditFieldsToEn(result, controller.signal);
+
+        setResult((prev) => {
+          if (!prev) return prev;
+          if ((prev.profile?.username || '') !== (result.profile?.username || '')) return prev;
+          return {
+            ...prev,
+            _localized: {
+              ...(prev._localized || {}),
+              base,
+              [locale]: {
+                ...extractAuditLocalizedFields(prev),
+                ...translated,
+              },
+            },
+          };
+        });
+      } catch (e: any) {
+        if (!controller.signal.aborted && !isAbortError(e)) {
+          addLog(locale === 'zh' ? `翻译失败：${e?.message || 'unknown error'}` : `Translation failed: ${e?.message || 'unknown error'}`);
+        }
+      } finally {
+        auditTranslateInFlightRef.current[locale] = false;
+        if (auditTranslateTokenRef.current[locale] === token) {
+          setAuditTranslateBusy((prev) => ({ ...prev, [locale]: false }));
+        }
+      }
+    })();
+  }, [lang, result, hasGeminiKey]);
 
   const validateStrategyJson = (json: any) => {
     const core = normalizeList(json?.core_tags || []);
@@ -400,6 +635,8 @@ Return JSON only.`));
       let suppressedOffTopic = 0;
       let lastPublishedSize = 0;
       let hardLimitReached = false;
+      const avatarEnriched = new Set<string>();
+      const avatarEnrichInFlight = new Set<string>();
 
       const commercialBlacklist = [
         'daigou', 'price', 'wholesale', 'reseller', 'seller', 'sale', 'shop', 'store', 
@@ -413,6 +650,21 @@ Return JSON only.`));
       ]);
 
       const normalizeText = (v: any) => String(v || '').toLowerCase().trim();
+      const sanitizeUrl = (v: any): string | null => {
+        if (!v) return null;
+        let s = String(v).trim();
+        s = s.replace(/^['"`]+|['"`]+$/g, '').trim();
+        if (!/^https?:\/\//i.test(s)) return null;
+        return s;
+      };
+      const toFiniteNumber = (v: any): number | undefined => {
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        if (typeof v === 'string') {
+          const n = Number(v);
+          if (Number.isFinite(n)) return n;
+        }
+        return undefined;
+      };
 
       const tokenizeQuery = (q: string) => {
         const raw = normalizeText(q).replace(/^[@#]/, '');
@@ -489,7 +741,7 @@ Return JSON only.`));
           const hashtags = extractHashtags(item);
           const contextText = [username, displayName, bio, caption, hashtags].filter(Boolean).join(' ').toLowerCase();
           
-          const fCount =
+          const fCountRaw =
             userObj.followerCount ||
             userObj.followersCount ||
             userObj.follower_count ||
@@ -497,7 +749,11 @@ Return JSON only.`));
             item.followerCount ||
             item.followersCount ||
             item.follower_count ||
+            item.followers ||
+            item.followersCount ||
+            item.followers_count ||
             0;
+          const fCount = toFiniteNumber(fCountRaw) ?? 0;
 
           // Scoring System V2 (Adaptive)
           let score = 80;
@@ -553,21 +809,21 @@ Return JSON only.`));
             return;
           }
 
-          const avatarUrl =
+          const avatarUrl = sanitizeUrl(
             userObj.profile_pic_url ||
-            userObj.profilePicUrl ||
-            userObj.profile_pic_url_hd ||
-            item.profile_pic_url ||
-            item.profilePicUrl ||
-            item.profile_pic_url_hd ||
-            item.ownerProfilePicUrl ||
-            item.owner_profile_pic_url ||
-            item.displayUrl ||
-            item.display_url ||
-            item.imageUrl ||
-            item.image_url ||
-            (Array.isArray(item.images) ? item.images[0] : null) ||
-            null;
+              userObj.profilePicUrl ||
+              userObj.profile_pic_url_hd ||
+              item.profile_pic_url ||
+              item.profilePicUrl ||
+              item.profile_pic_url_hd ||
+              item.ownerProfilePicUrl ||
+              item.owner_profile_pic_url ||
+              item.displayUrl ||
+              item.display_url ||
+              item.imageUrl ||
+              item.image_url ||
+              (Array.isArray(item.images) ? item.images[0] : null)
+          );
 
           const verified = !!(userObj.isVerified || userObj.is_verified || item.isVerified || item.is_verified);
 
@@ -591,6 +847,59 @@ Return JSON only.`));
       };
 
       const gradients = ["from-indigo-500 to-purple-600", "from-pink-500 to-rose-500", "from-emerald-400 to-cyan-500", "from-amber-400 to-orange-500"];
+
+      const enrichCandidateAvatars = async (list: any[]) => {
+        const needsProfilePic = (u: any) => {
+          const s = String(u?.avatar_url || '');
+          return !s || !/(t51\\.2885-19|profile_pic)/i.test(s);
+        };
+        const targets = list
+          .slice(0, 12)
+          .filter(needsProfilePic)
+          .filter((c) => c?.id && !avatarEnriched.has(c.id) && !avatarEnrichInFlight.has(c.id));
+        if (targets.length === 0) return;
+        addLog(`Avatar Enrichment: probing ${targets.length} profiles for profile pictures...`);
+        const CONCURRENCY = 2;
+        for (let i = 0; i < targets.length; i += CONCURRENCY) {
+          if (controller.signal.aborted) break;
+          const chunk = targets.slice(i, i + CONCURRENCY);
+          await Promise.all(
+            chunk.map(async (c: any) => {
+              if (!c?.id) return;
+              avatarEnrichInFlight.add(c.id);
+              try {
+                await abortableDelay(Math.random() * 500, controller.signal);
+                const details = await runApifyTask(
+                  'apify~instagram-scraper',
+                  { directUrls: [`https://www.instagram.com/${c.id}/`], resultsType: 'details', resultsLimit: 1 },
+                  addLog,
+                  (info) => {
+                    const usd = typeof info.usageTotalUsd === 'number' ? info.usageTotalUsd : info.usageUsd;
+                    if (typeof usd === 'number') {
+                      setApifySpend((prev) => ({
+                        lastRunUsd: usd,
+                        sessionUsd: prev.sessionUsd + usd,
+                        runCount: prev.runCount + 1,
+                      }));
+                      refreshApifyQuota(false);
+                    }
+                  },
+                  { signal: controller.signal, onRunStarted: (runId) => activeApifyRunsRef.current.add(runId) }
+                );
+                const d0 = Array.isArray(details) ? details[0] : null;
+                const pic = sanitizeUrl(d0?.profilePicUrlHD || d0?.profilePicUrl);
+                if (!pic) return;
+                setCandidates((prev) => prev.map((x) => (x.id === c.id ? { ...x, avatar_url: pic } : x)));
+              } catch {}
+              finally {
+                avatarEnriched.add(c.id);
+                avatarEnrichInFlight.delete(c.id);
+              }
+            })
+          );
+        }
+      };
+
       const publishCandidates = () => {
         const mapped = Array.from(uniqueMap.values()).map((u: any, idx: number) => {
           return {
@@ -618,6 +927,7 @@ Return JSON only.`));
         });
         mapped.sort((a, b) => b.match_score - a.match_score);
         setCandidates(mapped);
+        void enrichCandidateAvatars(mapped);
       };
 
       const businessHintTokens = [
@@ -709,7 +1019,8 @@ Output STRICT JSON only with this schema:
     \"creator_signals\": string[],
     \"mismatch_reason\": string
   }
-}`;
+}
+${outputLanguageInstruction(lang)}`;
         const text = await geminiGenerateJson([{ text: prompt }], controller.signal, 35000);
         return JSON.parse(text || '{}');
       };
@@ -1031,8 +1342,10 @@ Output STRICT JSON only with this schema:
     }
     
     try {
+      const apifyRunUsdById = new Map<string, number>();
       const igData = await fetchInstagramData(targetUsername, addLog, (info) => {
         const usd = typeof info.usageTotalUsd === 'number' ? info.usageTotalUsd : info.usageUsd;
+        if (info?.runId) apifyRunUsdById.set(info.runId, typeof usd === 'number' ? usd : 0);
         if (typeof usd === 'number') {
           setApifySpend(prev => ({
             lastRunUsd: usd,
@@ -1083,6 +1396,8 @@ Output STRICT JSON only with this schema:
       
       addLog(`Visual Context: ${validImages.length} images loaded for AI audit.`);
 
+      const apifyUsdTotal = Array.from(apifyRunUsdById.values()).reduce((acc, n) => acc + (Number.isFinite(n) ? n : 0), 0);
+
       const prompt = `
       Role: Expert Influencer Auditor & Brand Strategist (V3.1 Protocol).
       Task: Perform a deep audit of the following Instagram Creator to determine fit for the brand.
@@ -1091,8 +1406,17 @@ Output STRICT JSON only with this schema:
       
       Creator Data:
       - Username: @${igData.username}
+      - Profile URL: ${igData.profileUrl || `https://www.instagram.com/${igData.username}/`}
+      - Full Name: ${igData.fullName || ''}
       - Bio: ${igData.biography}
       - Followers: ${igData.followersCount}
+      - Following: ${igData.followsCount ?? ''}
+      - Total Posts: ${igData.postsCount ?? ''}
+      - Verified: ${String(Boolean(igData.verified))}
+      - Private: ${String(Boolean(igData.private))}
+      - Business Account: ${String(Boolean(igData.isBusinessAccount))}
+      - Business Category: ${igData.businessCategoryName ?? ''}
+      - External URL: ${igData.externalUrl || ''}
       
       Recent Content Analysis (Last ${igData.posts.length} posts):
       ${igData.posts.map((p, i) => `
@@ -1112,20 +1436,37 @@ Output STRICT JSON only with this schema:
       - visual_analysis: Describe their aesthetic consistency (Refer to the provided images).
       - niche_category: Their primary content category.
       - risk_factors: Array of red flags (e.g., "Mismatched Audience", "Low Engagement", "Competitor Promo").
-      `;
+      ${outputLanguageInstruction(lang)}`;
 
       const parts = [...validImages, { text: prompt }];
       const text = await geminiGenerateJson(parts, controller.signal, 120000);
-      const aiResult = JSON.parse(text || '{}');
+      let aiResult = JSON.parse(text || '{}');
+      if (lang === 'zh' && shouldTranslateAuditToZh(aiResult)) {
+        addLog('检测到审计结果存在英文混杂，正在自动翻译为中文...');
+        try {
+          aiResult = await translateAuditResultToZh(aiResult, controller.signal);
+        } catch (e: any) {
+          if (!controller.signal.aborted && !isAbortError(e)) addLog(`自动翻译失败：${e?.message || 'unknown error'}`);
+        }
+      }
+      if (lang === 'en' && shouldTranslateAuditToEn(aiResult)) {
+        addLog('Detected Chinese mix in audit output, translating to English...');
+        try {
+          aiResult = await translateAuditResultToEn(aiResult, controller.signal);
+        } catch (e: any) {
+          if (!controller.signal.aborted && !isAbortError(e)) addLog(`Auto-translation failed: ${e?.message || 'unknown error'}`);
+        }
+      }
       
-      // Calculate costs (approximate)
-      // Apify: ~$0.03 per run
-      // Gemini: ~$0.002 per request (image + text)
-      const apifyCost = 0.03 * 7.2; // CNY
-      const aiCost = 0.002 * 7.2;   // CNY
+      const apifyCost = apifyUsdTotal > 0 ? apifyUsdTotal * 7.2 : 0;
+      const aiCost = 0.002 * 7.2;   
       
       const fullResult = {
         ...aiResult,
+        _localized: {
+          base: lang,
+          [lang]: extractAuditLocalizedFields(aiResult),
+        },
         cost_estimation: {
           apify_cost: Number(apifyCost.toFixed(4)),
           ai_cost: Number(aiCost.toFixed(4)),
@@ -1141,6 +1482,14 @@ Output STRICT JSON only with this schema:
         profile: {
           username: igData.username,
           followers: igData.followersCount,
+          follows: igData.followsCount,
+          posts: igData.postsCount,
+          verified: igData.verified,
+          private: igData.private,
+          is_business_account: igData.isBusinessAccount,
+          business_category_name: igData.businessCategoryName,
+          external_url: igData.externalUrl,
+          avatar_url: igData.profilePicUrlHD || igData.profilePicUrl,
           avg_likes: Math.floor(igData.posts.reduce((acc: number, p: any) => acc + (p.likesCount || 0), 0) / (igData.posts.length || 1)),
           engagement_rate: ((igData.posts.reduce((acc: number, p: any) => acc + (p.likesCount || 0) + (p.commentsCount || 0), 0) / (igData.posts.length || 1)) / (igData.followersCount || 1) * 100).toFixed(2) + '%'
         }
@@ -1185,12 +1534,27 @@ Output STRICT JSON only with this schema:
     <div className="min-h-screen bg-[#F4F6FB] pb-24 font-sans text-slate-900">
       <Header 
         lang={lang} 
-        setLang={setLang} 
+        setLang={(next) => {
+          if (auditTranslateBusy.zh || auditTranslateBusy.en) return;
+
+          const current = result;
+          if (mode === 'audit' && current && next !== lang) {
+            const localized = current._localized;
+            const hasTarget = Boolean(localized && (localized as any)[next]);
+            if (!hasTarget && hasGeminiKey) {
+              const willTranslate = next === 'zh' ? shouldTranslateAuditToZh(current) : shouldTranslateAuditToEn(current);
+              if (willTranslate) setAuditTranslateBusy((prev) => ({ ...prev, [next]: true }));
+            }
+          }
+
+          setLang(next);
+        }} 
         mode={mode} 
         setMode={setMode} 
         onLogout={() => void handleLogout()}
         credits={credits}
         creditsLoading={Boolean(user && profileLoading)}
+        langBusy={Boolean(mode === 'audit' && result && auditTranslateBusy[lang])}
       />
       {creditsModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-6">
@@ -1233,6 +1597,7 @@ Output STRICT JSON only with this schema:
             setApifyToken={setApifyToken}
             apifyQuota={apifyQuota}
             apifySpend={apifySpend}
+            onRefreshApifyQuota={() => void refreshApifyQuota(true)}
             productImg={productImg}
             setProductImg={setProductImg}
             productDesc={productDesc}

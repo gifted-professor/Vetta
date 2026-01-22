@@ -6,6 +6,7 @@ import {
   Camera,
   Loader2,
   Sparkles,
+  RefreshCw,
 } from 'lucide-react';
 import { translations } from '../locales/translations';
 
@@ -19,12 +20,14 @@ interface InputSectionProps {
     maxMonthlyUsageUsd?: number;
     updatedAt?: number;
     error?: string;
+    loading?: boolean;
   };
   apifySpend?: {
     lastRunUsd?: number;
     sessionUsd?: number;
     runCount?: number;
   };
+  onRefreshApifyQuota?: () => void;
   productImg: string | null;
   setProductImg: (img: string | null) => void;
   productDesc: string;
@@ -48,6 +51,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
   setApifyToken,
   apifyQuota,
   apifySpend,
+  onRefreshApifyQuota,
   productImg,
   setProductImg,
   productDesc,
@@ -95,29 +99,43 @@ export const InputSection: React.FC<InputSectionProps> = ({
           className="w-full px-6 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-xs outline-none focus:border-indigo-500 transition-all shadow-inner"
         />
         {(hasApifyToken || apifyToken?.trim()) && (
-          <div className="text-[10px] font-bold text-slate-500 flex flex-wrap gap-x-3 gap-y-1">
-            <span>
-              {lang === 'zh' ? '本周期已用' : 'Cycle used'}:{' '}
-              {typeof apifyQuota?.monthlyUsageUsd === 'number' ? `$${apifyQuota.monthlyUsageUsd.toFixed(2)}` : (lang === 'zh' ? '未知' : 'N/A')}
-              {typeof apifyQuota?.maxMonthlyUsageUsd === 'number' ? ` / $${apifyQuota.maxMonthlyUsageUsd.toFixed(2)}` : ''}
-            </span>
-            <span>
-              {lang === 'zh' ? '本次消耗' : 'Last run'}:{' '}
-              {typeof apifySpend?.lastRunUsd === 'number' ? `$${apifySpend.lastRunUsd.toFixed(4)}` : (lang === 'zh' ? '—' : '—')}
-            </span>
-            <span>
-              {lang === 'zh' ? '会话累计' : 'Session'}:{' '}
-              {typeof apifySpend?.sessionUsd === 'number' ? `$${apifySpend.sessionUsd.toFixed(4)}` : (lang === 'zh' ? '—' : '—')}
-              {typeof apifySpend?.runCount === 'number' ? ` (${apifySpend.runCount})` : ''}
-            </span>
-            <span>
-              {lang === 'zh' ? '更新' : 'Updated'}:{' '}
-              {apifyQuota?.updatedAt ? new Date(apifyQuota.updatedAt).toLocaleTimeString() : (lang === 'zh' ? '—' : '—')}
-            </span>
-            {apifyQuota?.error && (
-              <span className="text-rose-600">
-                {lang === 'zh' ? '用量获取失败' : 'Usage fetch failed'}
+          <div className="flex items-end justify-between gap-3">
+            <div className="text-[10px] font-bold text-slate-500 flex flex-wrap gap-x-3 gap-y-1">
+              <span>
+                {lang === 'zh' ? '本周期已用' : 'Cycle used'}:{' '}
+                {typeof apifyQuota?.monthlyUsageUsd === 'number' ? `$${apifyQuota.monthlyUsageUsd.toFixed(2)}` : (lang === 'zh' ? '未知' : 'N/A')}
+                {typeof apifyQuota?.maxMonthlyUsageUsd === 'number' ? ` / $${apifyQuota.maxMonthlyUsageUsd.toFixed(2)}` : ''}
               </span>
+              <span>
+                {lang === 'zh' ? '本次消耗' : 'Last run'}:{' '}
+                {typeof apifySpend?.lastRunUsd === 'number' ? `$${apifySpend.lastRunUsd.toFixed(4)}` : (lang === 'zh' ? '—' : '—')}
+              </span>
+              <span>
+                {lang === 'zh' ? '会话累计' : 'Session'}:{' '}
+                {typeof apifySpend?.sessionUsd === 'number' ? `$${apifySpend.sessionUsd.toFixed(4)}` : (lang === 'zh' ? '—' : '—')}
+                {typeof apifySpend?.runCount === 'number' ? ` (${apifySpend.runCount})` : ''}
+              </span>
+              <span>
+                {lang === 'zh' ? '更新' : 'Updated'}:{' '}
+                {apifyQuota?.updatedAt ? new Date(apifyQuota.updatedAt).toLocaleTimeString() : (lang === 'zh' ? '—' : '—')}
+              </span>
+              {apifyQuota?.error && (
+                <span className="text-rose-600">
+                  {lang === 'zh' ? '用量获取失败' : 'Usage fetch failed'}
+                </span>
+              )}
+            </div>
+            {onRefreshApifyQuota && (
+              <button
+                type="button"
+                onClick={onRefreshApifyQuota}
+                disabled={Boolean(apifyQuota?.loading)}
+                title={lang === 'zh' ? '刷新用量' : 'Refresh usage'}
+                className="shrink-0 w-9 h-9 rounded-2xl border-2 border-slate-100 bg-slate-50 text-slate-500 shadow-inner flex items-center justify-center hover:border-indigo-300 hover:text-indigo-700 transition-all active:scale-95 disabled:opacity-50 disabled:hover:border-slate-100 disabled:hover:text-slate-500"
+              >
+                <span className="sr-only">{lang === 'zh' ? '刷新用量' : 'Refresh usage'}</span>
+                <RefreshCw size={16} className={apifyQuota?.loading ? 'animate-spin' : undefined} />
+              </button>
             )}
           </div>
         )}

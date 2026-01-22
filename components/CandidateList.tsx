@@ -66,26 +66,37 @@ export const CandidateList: React.FC<CandidateListProps> = ({
                 title="Click to copy Instagram link"
               >
                 {copiedId === c.id ? (
-                    <div className="absolute inset-0 bg-emerald-500/80 z-20 flex items-center justify-center animate-in fade-in zoom-in">
-                        <Check size={18} className="text-white" />
-                    </div>
+                  <div className="absolute inset-0 bg-emerald-500/80 z-20 flex items-center justify-center animate-in fade-in zoom-in">
+                    <Check size={18} className="text-white" />
+                  </div>
                 ) : (
-                    <div className="absolute inset-0 bg-black/0 hover:bg-black/20 z-20 flex items-center justify-center transition-colors">
-                        <Copy size={14} className="text-white opacity-0 hover:opacity-100" />
-                    </div>
+                  <div className="absolute inset-0 bg-black/0 hover:bg-black/20 z-20 flex items-center justify-center transition-colors">
+                    <Copy size={14} className="text-white opacity-0 hover:opacity-100" />
+                  </div>
                 )}
-
                 <span className="absolute inset-0 flex items-center justify-center text-white font-black text-lg z-0 select-none">
                   {c.id?.charAt(0)?.toUpperCase() || '?'}
                 </span>
                 {c.avatar_url && (
                   <img
+                    key={c.avatar_url}
                     src={`/api/image?url=${encodeURIComponent(c.avatar_url)}`}
                     alt={c.id}
                     className="absolute inset-0 w-full h-full object-cover z-10"
                     referrerPolicy="no-referrer"
                     onError={(e) => {
-                      e.currentTarget.style.display = 'none';
+                      const img = e.currentTarget;
+                      const raw = c.avatar_url;
+                      if (!raw) {
+                        img.src = '';
+                        return;
+                      }
+                      if (img.dataset.fallback !== '1') {
+                        img.dataset.fallback = '1';
+                        img.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(raw)}`;
+                        return;
+                      }
+                      img.src = '';
                     }}
                   />
                 )}
