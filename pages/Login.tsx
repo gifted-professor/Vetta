@@ -1,24 +1,69 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sparkles } from 'lucide-react';
+import { supabase, supabaseReady } from '../supabase.client';
+import { useAuth } from '../auth';
 
 export const Login = () => {
   const navigate = useNavigate();
+  const { session } = useAuth();
   const [email, setEmail] = useState(() => localStorage.getItem('vetta_last_email') || '');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const handleLogin = (e: React.FormEvent) => {
+  React.useEffect(() => {
+    if (session) navigate('/');
+  }, [navigate, session]);
+
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!supabaseReady) {
+      setError('Missing Supabase env: VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY');
+      return;
+    }
     setLoading(true);
-    
-    // Simulate login delay
-    setTimeout(() => {
-      localStorage.setItem('vetta_auth', 'true');
+    setError(null);
+    setNotice(null);
+
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        setError(error.message);
+        return;
+      }
       localStorage.setItem('vetta_last_email', email);
-      setLoading(false);
       navigate('/');
-    }, 1000);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSignUp = async () => {
+    if (!supabaseReady) {
+      setError('Missing Supabase env: VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      const { data, error } = await supabase.auth.signUp({ email, password });
+      if (error) {
+        setError(error.message);
+        return;
+      }
+      localStorage.setItem('vetta_last_email', email);
+      if (data.session) {
+        navigate('/');
+        return;
+      }
+      setNotice('注册成功，请检查邮箱完成验证后再登录。');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -33,6 +78,17 @@ export const Login = () => {
         </div>
 
         <form onSubmit={handleLogin} className="space-y-6">
+          {(error || notice) && (
+            <div
+              className={`rounded-2xl border px-5 py-4 text-xs font-bold ${
+                error
+                  ? 'bg-rose-50 border-rose-100 text-rose-700'
+                  : 'bg-amber-50 border-amber-100 text-amber-800'
+              }`}
+            >
+              {error || notice}
+            </div>
+          )}
           <div className="space-y-2">
             <label className="text-xs font-black text-slate-400 uppercase tracking-widest ml-2">Email</label>
             <input
@@ -63,6 +119,14 @@ export const Login = () => {
             className="w-full py-5 bg-slate-900 text-white rounded-2xl font-black text-sm shadow-lg hover:bg-indigo-700 transition-all active:scale-95 disabled:opacity-50 mt-4"
           >
             {loading ? 'Signing In...' : 'Sign In'}
+          </button>
+          <button
+            type="button"
+            onClick={handleSignUp}
+            disabled={loading}
+            className="w-full py-5 bg-slate-100 text-slate-900 rounded-2xl font-black text-sm shadow-sm hover:bg-slate-200 transition-all active:scale-95 disabled:opacity-50"
+          >
+            {loading ? 'Creating Account...' : 'Create Account'}
           </button>
         </form>
       </div>

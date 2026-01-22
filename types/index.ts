@@ -25,6 +25,16 @@ export interface Candidate {
   is_verified?: boolean;
   match_reason?: string;
   is_commercial?: boolean;
+  match_signals?: string[];
+  ai_account_type?: 'creator' | 'restaurant' | 'shop' | 'brand' | 'other';
+  ai_is_creator_account?: boolean;
+  ai_confidence?: number;
+  aesthetic_match_score?: number;
+  ai_reasons?: string[];
+  ai_business_signals?: string[];
+  ai_creator_signals?: string[];
+  ai_mismatch_reason?: string;
+  ai_summary?: string;
 }
 
 export interface AuditResult {

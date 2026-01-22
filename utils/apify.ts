@@ -20,19 +20,157 @@ export interface InstagramData {
   }>;
 }
 
+export interface ApifyLimitsSummary {
+  maxMonthlyUsageUsd?: number;
+  monthlyUsageUsd?: number;
+  cycleStartAt?: string;
+  cycleEndAt?: string;
+}
+
+export interface ApifyRunUsageSummary {
+  runId: string;
+  usageUsd?: number;
+  usageTotalUsd?: number;
+}
+
+export interface ApifyTaskControl {
+  signal?: AbortSignal;
+  onRunStarted?: (runId: string) => void;
+}
+
+const extractNumber = (value: any): number | undefined => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+};
+
+const createAbortError = () => {
+  try {
+    return new DOMException('Aborted', 'AbortError');
+  } catch {
+    const err = new Error('Aborted');
+    (err as any).name = 'AbortError';
+    return err;
+  }
+};
+
+const abortableDelay = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
+    const id = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(id);
+      cleanup();
+      reject(createAbortError());
+    };
+    const cleanup = () => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+    };
+    if (signal) signal.addEventListener('abort', onAbort);
+  });
+
+export const fetchApifyLimits = async (): Promise<ApifyLimitsSummary | null> => {
+  const baseUrl = '/api/apify';
+  const res = await fetch(`${baseUrl}/users/me/limits`, {
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!res.ok) return null;
+  const json = await res.json();
+  const data = json?.data ?? json;
+
+  const maxMonthlyUsageUsd =
+    extractNumber(data?.limits?.maxMonthlyUsageUsd) ??
+    extractNumber(data?.maxMonthlyUsageUsd) ??
+    extractNumber(data?.maxMonthlyUsage?.usd) ??
+    extractNumber(data?.maxMonthlyUsageUSD);
+
+  const monthlyUsageUsd =
+    extractNumber(data?.currentUsage?.monthlyUsageUsd) ??
+    extractNumber(data?.currentUsage?.monthlyUsageUSD) ??
+    extractNumber(data?.current?.monthlyUsageUsd) ??
+    extractNumber(data?.current?.monthlyUsageUSD) ??
+    extractNumber(data?.currentUsage?.totalUsd) ??
+    extractNumber(data?.currentUsage?.usageUsd) ??
+    extractNumber(data?.usage?.monthlyUsageUsd) ??
+    extractNumber(data?.usage?.totalUsd) ??
+    extractNumber(data?.usageUsd) ??
+    extractNumber(data?.totalUsd);
+
+  const cycleStartAt =
+    data?.currentUsageCycle?.startedAt ??
+    data?.currentUsageCycle?.startAt ??
+    data?.monthlyUsageCycle?.startedAt ??
+    data?.monthlyUsageCycle?.startAt ??
+    data?.usageCycle?.startedAt ??
+    data?.usageCycle?.startAt ??
+    data?.startedAt;
+  const cycleEndAt =
+    data?.currentUsageCycle?.endsAt ??
+    data?.currentUsageCycle?.endAt ??
+    data?.monthlyUsageCycle?.endsAt ??
+    data?.monthlyUsageCycle?.endAt ??
+    data?.usageCycle?.endsAt ??
+    data?.usageCycle?.endAt ??
+    data?.endsAt;
+
+  return {
+    maxMonthlyUsageUsd,
+    monthlyUsageUsd,
+    cycleStartAt,
+    cycleEndAt,
+  };
+};
+
+export const fetchApifyRunUsage = async (runId: string): Promise<ApifyRunUsageSummary | null> => {
+  if (!runId) return null;
+
+  const baseUrl = '/api/apify';
+  const res = await fetch(`${baseUrl}/actor-runs/${runId}`, {
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!res.ok) return null;
+  const json = await res.json();
+  const data = json?.data ?? json;
+
+  return {
+    runId,
+    usageUsd: extractNumber(data?.usageUsd) ?? extractNumber(data?.usage?.usageUsd),
+    usageTotalUsd: extractNumber(data?.usageTotalUsd) ?? extractNumber(data?.usage?.usageTotalUsd),
+  };
+};
+
+export const abortApifyRun = async (runId: string): Promise<boolean> => {
+  if (!runId) return false;
+  const baseUrl = '/api/apify';
+  const res = await fetch(`${baseUrl}/actor-runs/${runId}/abort`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  return res.ok;
+};
+
 export const runApifyTask = async (
-  token: string,
   actorId: string,
   payload: any,
-  addLog: (msg: string) => void
+  addLog: (msg: string) => void,
+  onRunFinished?: (info: { actorId: string; runId: string; datasetId?: string; usageTotalUsd?: number; usageUsd?: number }) => void,
+  control?: ApifyTaskControl
 ): Promise<any[]> => {
-  const cleanToken = token ? token.trim() : '';
-  if (!cleanToken) {
-    addLog('Error: Apify Token is empty/undefined!');
-    throw new Error('Apify Token is missing');
-  }
-  addLog(`Debug: Using Apify Token: ${cleanToken.substring(0, 5)}...${cleanToken.substring(cleanToken.length - 4)}`);
-
   // HYBRID MODE SELECTION
   // Mode A: Sync Direct (Fastest, for audit/scraper)
   // Mode B: Async Polling (Robust, for search/discovery)
@@ -41,17 +179,16 @@ export const runApifyTask = async (
   
   addLog(`Mode: Async Polling Execution (${actorId})...`);
   const baseUrl = '/api/apify';
-  const headers = {
-    Authorization: `Bearer ${cleanToken}`,
-    'Content-Type': 'application/json',
-  };
+  const signal = control?.signal;
+  if (signal?.aborted) throw createAbortError();
   
   // 1. Start the run
-  const startUrl = `${baseUrl}/acts/${actorId}/runs?token=${cleanToken}`;
+  const startUrl = `${baseUrl}/acts/${actorId}/runs`;
   const startRes = await fetch(startUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal,
   });
   
   if (!startRes.ok) {
@@ -61,21 +198,28 @@ export const runApifyTask = async (
   const startData = await startRes.json();
   const runId = startData.data.id;
   const datasetId = startData.data.defaultDatasetId;
+  if (control?.onRunStarted) control.onRunStarted(runId);
+  if (signal?.aborted) {
+    await abortApifyRun(runId).catch(() => false);
+    throw createAbortError();
+  }
 
   // 2. Poll for completion
   let attempts = 0;
-  const maxAttempts = 30; // 30 * 2s = 60s timeout
+  const maxAttempts = actorId.includes('instagram-search-scraper') ? 60 : 30; // 60 * 2s = 120s timeout
   
   while (attempts < maxAttempts) { 
-    await new Promise(r => setTimeout(r, 2000)); // Wait 2s
+    await abortableDelay(2000, signal);
     attempts++;
     
       // Use a timeout for status check to prevent hanging connections
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout per poll
+      const onAbort = () => controller.abort();
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
 
       try {
-        const statusUrl = `${baseUrl}/acts/${actorId}/runs/${runId}?token=${token}`;
+        const statusUrl = `${baseUrl}/acts/${actorId}/runs/${runId}`;
         const statusRes = await fetch(statusUrl, { signal: controller.signal });
         clearTimeout(timeoutId);
         
@@ -96,12 +240,18 @@ export const runApifyTask = async (
         }
       } catch (pollErr: any) {
         clearTimeout(timeoutId);
+        if (signal?.aborted) {
+          await abortApifyRun(runId).catch(() => false);
+          throw createAbortError();
+        }
         if (pollErr.name === 'AbortError') {
              addLog(`Debug: Polling request timed out (10s). Retrying...`);
         } else {
              console.warn("Polling error:", pollErr);
              addLog(`Polling error: ${pollErr.message}`);
         }
+      } finally {
+        if (signal) signal.removeEventListener('abort', onAbort);
       }
     }
 
@@ -113,8 +263,8 @@ export const runApifyTask = async (
 
   // 3. Fetch results
   addLog(`Debug: Fetching results for dataset ${datasetId}...`);
-  const resultsUrl = `${baseUrl}/datasets/${datasetId}/items?token=${token}`;
-  const resultsRes = await fetch(resultsUrl);
+  const resultsUrl = `${baseUrl}/datasets/${datasetId}/items`;
+  const resultsRes = await fetch(resultsUrl, { signal });
   
   if (!resultsRes.ok) {
     const errText = await resultsRes.text();
@@ -123,19 +273,25 @@ export const runApifyTask = async (
   
   const finalJson = await resultsRes.json();
   addLog(`Debug: Dataset fetched. Items: ${Array.isArray(finalJson) ? finalJson.length : 'Not Array'}`);
+  if (onRunFinished) {
+    const usage = await fetchApifyRunUsage(runId);
+    onRunFinished({
+      actorId,
+      runId,
+      datasetId,
+      usageTotalUsd: usage?.usageTotalUsd,
+      usageUsd: usage?.usageUsd,
+    });
+  }
   return finalJson;
 };
 
 export const fetchInstagramData = async (
   username: string,
-  token: string,
-  addLog: (msg: string) => void
+  addLog: (msg: string) => void,
+  onRunFinished?: (info: { actorId: string; runId: string; datasetId?: string; usageTotalUsd?: number; usageUsd?: number }) => void,
+  control?: ApifyTaskControl
 ): Promise<InstagramData | null> => {
-  if (!token) {
-    addLog('Error: Apify Token is missing.');
-    return null;
-  }
-
   // Use the robust runApifyTask instead of fragile sync call
   const actorId = 'apify~instagram-scraper'; 
   
@@ -151,7 +307,7 @@ export const fetchInstagramData = async (
   };
 
   try {
-    const results = await runApifyTask(token, actorId, payload, addLog);
+    const results = await runApifyTask(actorId, payload, addLog, onRunFinished, control);
     
     // Check for specific error object returned by Apify
     if (results && results.length === 1 && (results[0].error || results[0].errorDescription)) {

@@ -118,10 +118,22 @@ export const CandidateList: React.FC<CandidateListProps> = ({
                       N/A
                     </span>
                   )}
-                  <span className="text-slate-400 text-[8px] font-bold uppercase tracking-wider truncate">
+                  <span
+                    className="text-slate-400 text-[8px] font-bold uppercase tracking-wider truncate"
+                    title={[c.match_reason, ...(c.match_signals || [])].filter(Boolean).join(' · ')}
+                  >
                     {c.match_reason}
+                    {c.match_signals?.length ? ` · ${c.match_signals.join(' · ')}` : ''}
                   </span>
                 </div>
+                {c.ai_summary && (
+                  <div
+                    className="mt-1 text-[8px] font-bold text-slate-500 tracking-tight truncate"
+                    title={c.ai_summary}
+                  >
+                    {c.ai_summary}
+                  </div>
+                )}
               </div>
             </div>
 

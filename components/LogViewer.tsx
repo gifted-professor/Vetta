@@ -10,9 +10,12 @@ import React, { useRef, useEffect } from 'react';
 
 interface LogViewerProps {
   logs: string[];
+  canCancel?: boolean;
+  onCancel?: () => void;
+  cancelLabel?: string;
 }
 
-export const LogViewer: React.FC<LogViewerProps> = ({ logs }) => {
+export const LogViewer: React.FC<LogViewerProps> = ({ logs, canCancel, onCancel, cancelLabel }) => {
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -21,6 +24,17 @@ export const LogViewer: React.FC<LogViewerProps> = ({ logs }) => {
 
   return (
     <div className="bg-slate-900 rounded-[2rem] p-6 h-40 overflow-y-auto font-mono text-[9px] space-y-1.5 border border-white/5 shadow-2xl custom-scrollbar">
+      {canCancel && onCancel && (
+        <div className="sticky top-0 z-20 -mt-2 pb-2 flex justify-end bg-slate-900">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-3 py-1.5 rounded-xl bg-rose-500/10 text-rose-200 border border-rose-500/30 text-[10px] font-black uppercase tracking-widest hover:bg-rose-500/20 active:scale-95"
+          >
+            {cancelLabel || 'Stop'}
+          </button>
+        </div>
+      )}
       {logs.map((l, i) => (
         <div key={i} className="flex gap-2 text-slate-400">
           <span className="text-indigo-500/50 select-none">#{i}</span>

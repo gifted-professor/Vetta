@@ -16,9 +16,11 @@ interface HeaderProps {
   mode: 'discovery' | 'audit';
   setMode: (mode: 'discovery' | 'audit') => void;
   onLogout: () => void;
+  credits?: number | null;
+  creditsLoading?: boolean;
 }
 
-export const Header: React.FC<HeaderProps> = ({ lang, setLang, mode, setMode, onLogout }) => {
+export const Header: React.FC<HeaderProps> = ({ lang, setLang, mode, setMode, onLogout, credits, creditsLoading }) => {
   const t = translations[lang];
 
   return (
@@ -66,6 +68,11 @@ export const Header: React.FC<HeaderProps> = ({ lang, setLang, mode, setMode, on
       </nav>
 
       <div className="flex items-center gap-4">
+        <span className="text-[10px] font-black text-slate-900 bg-slate-100 border border-slate-200 px-3 py-2 rounded-xl uppercase tracking-widest">
+          {lang === 'zh'
+            ? `点数 ${creditsLoading ? '…' : typeof credits === 'number' ? credits : '—'}`
+            : `Credits ${creditsLoading ? '…' : typeof credits === 'number' ? credits : '—'}`}
+        </span>
         <div className="flex bg-slate-100 p-1 rounded-xl">
           <button
             onClick={() => setLang('zh')}

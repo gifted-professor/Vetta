@@ -16,17 +16,47 @@ import { StrategyMatrix } from '../components/StrategyMatrix';
 import { CandidateList } from '../components/CandidateList';
 import { AuditReport } from '../components/AuditReport';
 
-import { fetchInstagramData, runApifyTask } from '../utils/apify';
+import { abortApifyRun, fetchApifyLimits, fetchInstagramData, runApifyTask } from '../utils/apify';
+import { supabase } from '../supabase.client';
+import { useAuth } from '../auth';
 
 export const Dashboard = () => {
   const navigate = useNavigate();
+  const { user, profile, profileLoading, error: authError, deductCredits } = useAuth();
   const [lang, setLang] = useState<'zh' | 'en'>('zh');
   const t = translations[lang];
   const [mode, setMode] = useState<'discovery' | 'audit'>('discovery');
+  const hasApifyToken = Boolean(process.env.VETTA_HAS_APIFY_TOKEN);
+  const hasGeminiKey = Boolean(process.env.VETTA_HAS_GEMINI_KEY);
+  const [creditsModalOpen, setCreditsModalOpen] = useState(false);
+  const [creditsModalDetail, setCreditsModalDetail] = useState<string | null>(null);
   
-  const handleLogout = () => {
-    localStorage.removeItem('vetta_auth');
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
     navigate('/login');
+  };
+
+  const openCreditsModal = () => setCreditsModalOpen(true);
+  const credits = typeof profile?.credits === 'number' ? profile.credits : null;
+
+  const deductBeforeCostlyAction = async () => {
+    if (!user) {
+      navigate('/login');
+      return false;
+    }
+    if (typeof profile?.credits === 'number' && profile.credits <= 0) {
+      setCreditsModalDetail(null);
+      openCreditsModal();
+      return false;
+    }
+    const res = await deductCredits();
+    if (!res.ok) {
+      setCreditsModalDetail(res.error || authError || null);
+      openCreditsModal();
+      return false;
+    }
+    setCreditsModalDetail(null);
+    return true;
   };
 
   const [productImg, setProductImg] = useState<string | null>(() => localStorage.getItem('vetta_productImg') || null);
@@ -64,40 +94,163 @@ export const Dashboard = () => {
   
   const [url, setUrl] = useState('');
   const [brandProfile, setBrandProfile] = useState('');
-  const [apifyToken, setApifyToken] = useState(process.env.APIFY_API_TOKEN || '');
+  const [apifyToken, setApifyToken] = useState('');
+  const [apifyQuota, setApifyQuota] = useState<{
+    monthlyUsageUsd?: number;
+    maxMonthlyUsageUsd?: number;
+    updatedAt?: number;
+    error?: string;
+  }>({});
+  const [apifySpend, setApifySpend] = useState<{
+    lastRunUsd?: number;
+    sessionUsd: number;
+    runCount: number;
+  }>({ sessionUsd: 0, runCount: 0 });
+  const apifyQuotaLastFetchRef = React.useRef(0);
   
   const [loading, setLoading] = useState(false);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logs, setLogs] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem('vetta_logs');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.map((s) => String(s || '')).filter(Boolean).slice(-400) : [];
+    } catch {
+      return [];
+    }
+  });
   const [result, setResult] = useState<AuditResult | null>(null);
+  const taskControllerRef = React.useRef<AbortController | null>(null);
+  const activeApifyRunsRef = React.useRef(new Set<string>());
 
   const addLog = (msg: string) => {
-    setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+    setLogs(prev => {
+      const next = [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`];
+      return next.length > 400 ? next.slice(-400) : next;
+    });
   };
 
-  const geminiGenerateJson = async (parts: any[]) => {
-    const apiKey = process.env.API_KEY;
-    if (!apiKey) throw new Error('Missing Gemini API key');
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem('vetta_logs', JSON.stringify(logs.slice(-400)));
+    } catch {
+      return;
+    }
+  }, [logs]);
 
-    const url = `/api/gemini/v1beta/models/gemini-3-pro-preview:generateContent?key=${apiKey}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts }],
-        generationConfig: { responseMimeType: 'application/json' },
-      }),
+  const isAbortError = (e: any) => {
+    const name = String(e?.name || '');
+    const msg = String(e?.message || '');
+    return name === 'AbortError' || msg === 'Aborted';
+  };
+
+  const abortableDelay = (ms: number, signal?: AbortSignal) =>
+    new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+        return;
+      }
+      const id = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(id);
+        cleanup();
+        reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+      };
+      const cleanup = () => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+      };
+      if (signal) signal.addEventListener('abort', onAbort);
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(errText || `Gemini HTTP ${response.status}`);
-    }
+  const cancelCurrentTask = async () => {
+    const controller = taskControllerRef.current;
+    if (!controller || controller.signal.aborted) return;
 
-    const data = await response.json();
-    const text =
-      data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('') || '';
-    if (!text) throw new Error('Empty Gemini response');
-    return text;
+    controller.abort();
+    addLog(lang === 'zh' ? '已停止：将终止当前任务并阻止后续请求。' : 'Stopped: cancelling current task and preventing further requests.');
+
+    const runIds = Array.from(activeApifyRunsRef.current.values()) as string[];
+    activeApifyRunsRef.current.clear();
+    await Promise.allSettled(runIds.map((runId) => abortApifyRun(runId)));
+  };
+
+  const refreshApifyQuota = React.useCallback(async (force?: boolean) => {
+    if (!hasApifyToken) return;
+    const now = Date.now();
+    if (!force && now - apifyQuotaLastFetchRef.current < 30000) return;
+    apifyQuotaLastFetchRef.current = now;
+
+    try {
+      setApifyQuota(prev => ({ ...prev, error: undefined }));
+      const limits = await fetchApifyLimits();
+      if (!limits) {
+        setApifyQuota(prev => ({ ...prev, updatedAt: Date.now(), error: 'fetch_failed' }));
+        return;
+      }
+      setApifyQuota({
+        monthlyUsageUsd: limits.monthlyUsageUsd,
+        maxMonthlyUsageUsd: limits.maxMonthlyUsageUsd,
+        updatedAt: Date.now(),
+      });
+    } catch (e: any) {
+      setApifyQuota(prev => ({ ...prev, updatedAt: Date.now(), error: e?.message || 'fetch_failed' }));
+    }
+  }, [hasApifyToken]);
+
+  React.useEffect(() => {
+    setApifySpend({ sessionUsd: 0, runCount: 0 });
+    setApifyQuota({});
+    if (!hasApifyToken) return;
+    const id = setTimeout(() => {
+      refreshApifyQuota(true);
+    }, 600);
+    return () => clearTimeout(id);
+  }, [hasApifyToken, refreshApifyQuota]);
+
+  const geminiGenerateJson = async (parts: any[], signal?: AbortSignal, timeoutMs: number = 35000) => {
+    if (!hasGeminiKey) throw new Error('Missing Gemini API key');
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = () => controller.abort();
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+    const url = `/api/gemini/v1beta/models/gemini-3-pro-preview:generateContent`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts }],
+          generationConfig: { responseMimeType: 'application/json' },
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(errText || `Gemini HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      const text =
+        data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text || '').join('') || '';
+      if (!text) throw new Error('Empty Gemini response');
+      return text;
+    } catch (e: any) {
+      if (controller.signal.aborted) {
+        if (signal?.aborted) throw e;
+        throw new Error(`Gemini request timed out after ${Math.round(timeoutMs / 1000)}s`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeoutId);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    }
   };
 
   const normalizeList = (arr: any[]): string[] => {
@@ -142,6 +295,9 @@ export const Dashboard = () => {
     setStrategy(null);
     setCandidates([]);
     addLog("Applying 4:4:2 Scene-Based Logic via Gemini...");
+    const controller = new AbortController();
+    taskControllerRef.current = controller;
+    activeApifyRunsRef.current.clear();
     
     try {
       const b64Parts = productImg.split(',');
@@ -197,7 +353,7 @@ Output JSON schema:
 
       const attempt = async (extraInstruction?: string) => {
         const parts = extraInstruction ? [...baseParts, { text: extraInstruction }] : baseParts;
-        const text = await geminiGenerateJson(parts);
+        const text = await geminiGenerateJson(parts, controller.signal, 60000);
         const json = JSON.parse(text || '{}');
         return { text, json };
       };
@@ -215,6 +371,10 @@ Return JSON only.`));
       setStrategy(validated.strategy);
       addLog("Matrix Ready. Parallel Scenarios Capturing Engine Initialized.");
     } catch (err: any) {
+      if (controller.signal.aborted || isAbortError(err)) {
+        addLog(lang === 'zh' ? '已停止：产品解析已取消。' : 'Stopped: product analysis cancelled.');
+        return;
+      }
       addLog("Analysis Error: " + err.message);
     } finally {
       setLoading(false);
@@ -222,25 +382,77 @@ Return JSON only.`));
   };
 
   const startSourcing = async () => {
-    const token = apifyToken?.trim();
-    if (!token) {
-      addLog("Error: Missing Apify API Token.");
+    if (!hasApifyToken) {
+      addLog("Error: Missing Apify token (server env).");
       return;
     }
     
     setLoading(true);
-    setCandidates([]);
     addLog(`Launching Parallel Sourcing (Concurrent Mode)...`);
+    const controller = new AbortController();
+    taskControllerRef.current = controller;
+    activeApifyRunsRef.current.clear();
     
     try {
       const uniqueMap = new Map();
-      let totalFiltered = 0;
+      let totalSuppressed = 0;
+      let suppressedCommercial = 0;
+      let suppressedOffTopic = 0;
+      let lastPublishedSize = 0;
+      let hardLimitReached = false;
 
       const commercialBlacklist = [
         'daigou', 'price', 'wholesale', 'reseller', 'seller', 'sale', 'shop', 'store', 
         'factory', 'deals', 'global', 'shipping', 'order', 'original', 'discount', 
         'agent', 'proxy', 'personalshopper', 'mall', 'outlet', 'service'
       ];
+
+      const stopwords = new Set([
+        'a', 'an', 'the', 'and', 'or', 'to', 'for', 'of', 'with', 'in', 'on', 'at', 'by', 'from', 'as', 'is', 'are',
+        'be', 'this', 'that', 'these', 'those', 'your', 'my', 'our', 'their', 'it', 'its',
+      ]);
+
+      const normalizeText = (v: any) => String(v || '').toLowerCase().trim();
+
+      const tokenizeQuery = (q: string) => {
+        const raw = normalizeText(q).replace(/^[@#]/, '');
+        if (!raw) return [];
+        return raw
+          .split(/[\s/_-]+/g)
+          .map((t) => t.trim())
+          .filter((t) => t.length >= 3 && !stopwords.has(t));
+      };
+
+      const extractCaption = (item: any) =>
+        normalizeText(
+          item?.caption ||
+            item?.text ||
+            item?.description ||
+            item?.edge_media_to_caption?.edges?.[0]?.node?.text ||
+            item?.node?.edge_media_to_caption?.edges?.[0]?.node?.text ||
+            ''
+        );
+
+      const extractHashtags = (item: any) => {
+        const tags = item?.hashtags || item?.hashTags || item?.tags || item?.tagList;
+        if (Array.isArray(tags)) return normalizeText(tags.join(' '));
+        if (typeof tags === 'string') return normalizeText(tags);
+        return '';
+      };
+
+      const extractUsernameRaw = (item: any) => {
+        return (
+          item?.owner?.username ||
+          item?.node?.owner?.username ||
+          item?.user?.username ||
+          item?.ownerUsername ||
+          item?.authorUsername ||
+          item?.userName ||
+          item?.username ||
+          item?.handle ||
+          ''
+        );
+      };
 
       const ingestResults = (raw: any[], matchReason: string) => {
         if (!raw || raw.length === 0) return;
@@ -258,16 +470,24 @@ Return JSON only.`));
           if (item?.error || item?.errorDescription) return;
 
           // 1. 基础信息提取 - Enhanced Compatibility
-          const userObj = item.user || item.owner || item.node?.owner || item;
-          const usernameRaw = userObj.username || userObj.handle || item.username || item.userName || '';
+          const usernameRaw = extractUsernameRaw(item);
           const username = String(usernameRaw).toLowerCase().trim();
           
           if (!username || username.length < 2) return;
 
           if (uniqueMap.has(username)) return;
 
+          const userObj = item.owner || item.user || item.node?.owner || item;
           const bio = String(userObj.biography || userObj.bio || item.biography || item.bio || '').toLowerCase();
           const isCommercial = commercialBlacklist.some((kw) => username.includes(kw) || bio.includes(kw));
+
+          const displayNameRaw =
+            userObj.fullName || userObj.full_name || item.fullName || item.full_name || '';
+          const displayName = String(displayNameRaw || username);
+
+          const caption = extractCaption(item);
+          const hashtags = extractHashtags(item);
+          const contextText = [username, displayName, bio, caption, hashtags].filter(Boolean).join(' ').toLowerCase();
           
           const fCount =
             userObj.followerCount ||
@@ -296,18 +516,39 @@ Return JSON only.`));
             reasons.push(`Commercial`);
           }
           
-          if (strategy?.aesthetic_keywords.some((kw) => bio.includes(kw.toLowerCase()))) {
+          const aestheticHit = Boolean(
+            strategy?.aesthetic_keywords.some((kw) => contextText.includes(String(kw || '').toLowerCase()))
+          );
+          if (aestheticHit) {
             score += 15;
             reasons.push('Aesthetic');
           }
-          if (strategy?.core_tags.some((kw) => bio.includes(kw.toLowerCase()))) {
+          const tagHit = Boolean(
+            strategy?.core_tags.some((kw) => contextText.includes(String(kw || '').toLowerCase()))
+          );
+          if (tagHit) {
             score += 10;
             reasons.push('TagMatch');
           }
 
-          // Soft Filter: Only drop if commercial AND low score
+          const reasonTokens = tokenizeQuery(matchReason);
+          const queryHit = reasonTokens.length > 0 && reasonTokens.some((tok) => contextText.includes(tok));
+
+          if (!queryHit && !aestheticHit && !tagHit) {
+            score -= 35;
+            reasons.push('OffTopic');
+          }
+
           if (creatorOnly && isCommercial && score < 50) {
-            totalFiltered++;
+            totalSuppressed++;
+            suppressedCommercial++;
+            batchFiltered++;
+            return;
+          }
+
+          if (creatorOnly && reasons.includes('OffTopic') && score < 60) {
+            totalSuppressed++;
+            suppressedOffTopic++;
             batchFiltered++;
             return;
           }
@@ -319,9 +560,15 @@ Return JSON only.`));
             item.profile_pic_url ||
             item.profilePicUrl ||
             item.profile_pic_url_hd ||
+            item.ownerProfilePicUrl ||
+            item.owner_profile_pic_url ||
+            item.displayUrl ||
+            item.display_url ||
+            item.imageUrl ||
+            item.image_url ||
+            (Array.isArray(item.images) ? item.images[0] : null) ||
             null;
 
-          const displayName = userObj.fullName || userObj.full_name || item.fullName || item.full_name || username;
           const verified = !!(userObj.isVerified || userObj.is_verified || item.isVerified || item.is_verified);
 
           uniqueMap.set(username, {
@@ -333,6 +580,9 @@ Return JSON only.`));
             avatarUrl,
             match_score: Math.min(Math.max(score, 10), 99),
             is_commercial: isCommercial,
+            match_signals: reasons,
+            bio,
+            sample_captions: caption ? [caption] : [],
           });
           addedCount++;
         });
@@ -340,7 +590,176 @@ Return JSON only.`));
         addLog(`Ingest: ${addedCount} added, ${batchFiltered} filtered from batch.`);
       };
 
+      const gradients = ["from-indigo-500 to-purple-600", "from-pink-500 to-rose-500", "from-emerald-400 to-cyan-500", "from-amber-400 to-orange-500"];
+      const publishCandidates = () => {
+        const mapped = Array.from(uniqueMap.values()).map((u: any, idx: number) => {
+          return {
+            id: u.username,
+            url: `https://www.instagram.com/${u.username}/`,
+            match_score: u.match_score,
+            niche: u.displayName,
+            followers: u.followers,
+            avatar_url: u.avatarUrl,
+            avatar_color: `bg-gradient-to-br ${gradients[idx % gradients.length]}`,
+            is_verified: u.verified,
+            match_reason: u.match_reason,
+            is_commercial: u.is_commercial,
+            match_signals: u.match_signals,
+            ai_account_type: u.ai_account_type,
+            ai_is_creator_account: u.ai_is_creator_account,
+            ai_confidence: u.ai_confidence,
+            aesthetic_match_score: u.aesthetic_match_score,
+            ai_reasons: u.ai_reasons,
+            ai_business_signals: u.ai_business_signals,
+            ai_creator_signals: u.ai_creator_signals,
+            ai_mismatch_reason: u.ai_mismatch_reason,
+            ai_summary: u.ai_summary,
+          };
+        });
+        mapped.sort((a, b) => b.match_score - a.match_score);
+        setCandidates(mapped);
+      };
+
+      const businessHintTokens = [
+        'menu',
+        'reservation',
+        'book',
+        'booking',
+        'address',
+        'hours',
+        'open',
+        'whatsapp',
+        'order',
+        'delivery',
+        'happy hour',
+        'dm to order',
+      ];
+      const looksLikeBusinessText = (txt: string) => {
+        const s = String(txt || '').toLowerCase();
+        return businessHintTokens.some((kw) => s.includes(kw));
+      };
+
+      const GEMINI_MAX = 8;
+      const geminiInFlight = new Set<string>();
+      let geminiAuditCount = 0;
+
+      const buildAiSummary = (lang: 'zh' | 'en', r: any) => {
+        const score = typeof r?.aesthetic_match_score === 'number' ? Math.round(r.aesthetic_match_score) : undefined;
+        const conf = typeof r?.confidence === 'number' ? Math.round(r.confidence * 100) : undefined;
+        const acct = String(r?.account_type || 'other');
+        const biz = Array.isArray(r?.evidence?.business_signals) ? r.evidence.business_signals[0] : '';
+        if (lang === 'zh') {
+          const parts = [
+            typeof score === 'number' ? `审美匹配度 ${score}%` : '',
+            conf ? `置信度 ${conf}%` : '',
+            acct ? `类型 ${acct}` : '',
+            biz ? `证据：${biz}` : '',
+          ].filter(Boolean);
+          return parts.join('，');
+        }
+        const parts = [
+          typeof score === 'number' ? `Aesthetic ${score}%` : '',
+          conf ? `Conf ${conf}%` : '',
+          acct ? `Type ${acct}` : '',
+          biz ? `Evidence: ${biz}` : '',
+        ].filter(Boolean);
+        return parts.join(' • ');
+      };
+
+      const shouldGeminiAudit = (u: any) => {
+        if (!hasGeminiKey) return false;
+        if (!u?.username) return false;
+        if (u.ai_confidence != null || u.ai_summary) return false;
+        if (geminiAuditCount >= GEMINI_MAX) return false;
+        if (geminiInFlight.has(u.username)) return false;
+        if (typeof u.match_score === 'number' && u.match_score < 65) return false;
+        const sample = [u.username, u.displayName, u.bio, ...(u.sample_captions || [])].filter(Boolean).join('\n');
+        return Boolean(u.is_commercial) || looksLikeBusinessText(sample) || !u.bio;
+      };
+
+      const runGeminiAudit = async (u: any) => {
+        const aestheticKeywords = (strategy?.aesthetic_keywords || []).slice(0, 10);
+        const captions = Array.isArray(u.sample_captions) ? u.sample_captions.slice(0, 3) : [];
+        const prompt = `
+Role: Semantic reviewer for Instagram discovery (grey-zone audit).
+Goal: Decide whether this account is a creator or a local business (restaurant/shop/brand), and how strong the aesthetic match is.
+
+Decision weights:
+- Business signals: 50% (menu, reservation link, address, opening hours, WhatsApp order, delivery)
+- Creator persona signals: 30% (first-person reviews like \"I went...\", tutorials, creator voice)
+- Aesthetic match: 20% (match to provided aesthetic keywords)
+
+Input:
+- match_reason: ${String(u.match_reason || '')}
+- aesthetic_keywords: ${JSON.stringify(aestheticKeywords)}
+- username: @${String(u.username || '')}
+- display_name: ${String(u.displayName || '')}
+- bio: ${String(u.bio || '')}
+- recent_captions: ${JSON.stringify(captions)}
+
+Output STRICT JSON only with this schema:
+{
+  \"account_type\": \"creator\" | \"restaurant\" | \"shop\" | \"brand\" | \"other\",
+  \"is_creator_account\": boolean,
+  \"confidence\": number,
+  \"aesthetic_match_score\": number,
+  \"reasons\": string[],
+  \"evidence\": {
+    \"business_signals\": string[],
+    \"creator_signals\": string[],
+    \"mismatch_reason\": string
+  }
+}`;
+        const text = await geminiGenerateJson([{ text: prompt }], controller.signal, 35000);
+        return JSON.parse(text || '{}');
+      };
+
+      const pumpGeminiAudits = async () => {
+        if (!hasGeminiKey) return;
+        if (geminiAuditCount >= GEMINI_MAX) return;
+        if (geminiInFlight.size >= 1) return;
+        if (controller.signal.aborted) return;
+
+        const next = Array.from(uniqueMap.values())
+          .sort((a: any, b: any) => (b.match_score || 0) - (a.match_score || 0))
+          .find((u: any) => shouldGeminiAudit(u));
+        if (!next) return;
+
+        const uname = String(next.username);
+        geminiInFlight.add(uname);
+        geminiAuditCount++;
+        addLog(`AI audit: reviewing @${uname} (${geminiAuditCount}/${GEMINI_MAX})...`);
+        try {
+          const ai = await runGeminiAudit(next);
+          const acct = String(ai?.account_type || 'other').toLowerCase();
+          const patched = {
+            ...next,
+            ai_account_type: acct,
+            ai_is_creator_account: Boolean(ai?.is_creator_account),
+            ai_confidence: typeof ai?.confidence === 'number' ? ai.confidence : undefined,
+            aesthetic_match_score: typeof ai?.aesthetic_match_score === 'number' ? ai.aesthetic_match_score : undefined,
+            ai_reasons: Array.isArray(ai?.reasons) ? ai.reasons.map((s: any) => String(s || '')).filter(Boolean).slice(0, 3) : undefined,
+            ai_business_signals: Array.isArray(ai?.evidence?.business_signals) ? ai.evidence.business_signals.map((s: any) => String(s || '')).filter(Boolean).slice(0, 3) : undefined,
+            ai_creator_signals: Array.isArray(ai?.evidence?.creator_signals) ? ai.evidence.creator_signals.map((s: any) => String(s || '')).filter(Boolean).slice(0, 3) : undefined,
+            ai_mismatch_reason: typeof ai?.evidence?.mismatch_reason === 'string' ? ai.evidence.mismatch_reason : undefined,
+            ai_summary: buildAiSummary(lang, ai),
+          };
+          uniqueMap.set(uname, patched);
+          publishCandidates();
+          addLog(`AI audit: @${uname} -> ${acct} (conf=${typeof patched.ai_confidence === 'number' ? patched.ai_confidence.toFixed(2) : 'n/a'}).`);
+        } catch (e: any) {
+          if (!controller.signal.aborted && !isAbortError(e)) addLog(`AI audit failed: ${e?.message || 'unknown error'}`);
+        } finally {
+          geminiInFlight.delete(uname);
+          if (!controller.signal.aborted) void pumpGeminiAudits();
+        }
+      };
+
       const cleanQuery = (s: string) => s.replace(/^#/, '').trim();
+      const isHardLimit = (msg: string) => {
+        const m = (msg || '').toLowerCase();
+        return m.includes('monthly usage hard limit') || m.includes('platform-feature-disabled') || m.includes('hard limit');
+      };
 
       const targetCount = 5;
       const maxRounds = 8;
@@ -363,10 +782,10 @@ Return JSON only.`));
       addLog(`Query pools: action=${actionPool.length}, aesthetic=${aestheticPool.length}, identity=${identityPool.length}, fallback=${fallbackPool.length}`);
 
       const tried = new Set<string>();
-      let actionIdx = 0;
-      let aestheticIdx = 0;
-      let identityIdx = 0;
-      let fallbackIdx = 0;
+      const actionIdx = { v: 0 };
+      const aestheticIdx = { v: 0 };
+      const identityIdx = { v: 0 };
+      const fallbackIdx = { v: 0 };
 
       const nextFrom = (pool: string[], idxRef: { v: number }) => {
         while (idxRef.v < pool.length) {
@@ -380,96 +799,164 @@ Return JSON only.`));
         return null;
       };
 
-      for (let round = 1; round <= maxRounds && uniqueMap.size < targetCount; round++) {
-        const actionQ = nextFrom(actionPool, { v: actionIdx });
-        actionIdx = Math.min(actionIdx + 1, actionPool.length);
-        const aestheticQ = nextFrom(aestheticPool, { v: aestheticIdx });
-        aestheticIdx = Math.min(aestheticIdx + 1, aestheticPool.length);
-        const identityQ = nextFrom(identityPool, { v: identityIdx });
-        identityIdx = Math.min(identityIdx + 1, identityPool.length);
+      type Slot = 'A' | 'S' | 'I';
+      const refillSlots = (): Slot[] => {
+        const slots: Slot[] = ['A', 'A', 'A', 'A', 'S', 'S', 'S', 'S', 'I', 'I'];
+        for (let i = slots.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [slots[i], slots[j]] = [slots[j], slots[i]];
+        }
+        return slots;
+      };
+      let slotQueue: Slot[] = refillSlots();
+      const pullSlot = (): Slot => {
+        if (slotQueue.length === 0) slotQueue = refillSlots();
+        return slotQueue.shift() as Slot;
+      };
 
-        const tasks: Array<{ q: string; label: string; reason: string; type: string; rType?: string }> = [];
+      roundLoop: for (let round = 1; round <= maxRounds && uniqueMap.size < targetCount && !controller.signal.aborted; round++) {
+        const roundSlots: Slot[] = [pullSlot(), pullSlot(), pullSlot()];
+        const tasks: Array<{ q: string; label: string; reason: string; type: string; degraded?: boolean }> = [];
 
-        // 1. Action-Scene (动作): 必须搜内容 (Hashtag/Posts)
-        if (actionQ) {
-             tasks.push({ q: actionQ, label: 'Action-Scene', reason: actionQ, type: 'hashtag', rType: 'posts' });
-        }
-        
-        // 2. Aesthetic DNA (审美): 搜内容或Top (Hashtag通常更准)
-        if (aestheticQ) {
-             tasks.push({ q: aestheticQ, label: 'Aesthetic DNA', reason: aestheticQ, type: 'hashtag', rType: 'posts' });
-        }
-        
-        // 3. Creative Identity (身份): 必须搜人 (User Bio)
-        if (identityQ) {
-             tasks.push({ q: identityQ, label: 'Creative Identity', reason: identityQ, type: 'user', rType: 'details' });
-        }
+        const pickFromSlot = (slot: Slot) => {
+          if (slot === 'A') return nextFrom(actionPool, actionIdx);
+          if (slot === 'S') return nextFrom(aestheticPool, aestheticIdx);
+          return nextFrom(identityPool, identityIdx);
+        };
 
-        while (tasks.length < 3) {
-          const fb = nextFrom(fallbackPool, { v: fallbackIdx });
-          fallbackIdx = Math.min(fallbackIdx + 1, fallbackPool.length);
-          if (!fb) break;
-          // Fallback 默认搜 Top，容错率高
-          tasks.push({ q: fb, label: 'Fallback', reason: fb, type: 'top', rType: 'details' });
-        }
+        const slotLabel = (slot: Slot) => {
+          if (slot === 'A') return 'Action-Scene';
+          if (slot === 'S') return 'Aesthetic DNA';
+          return 'Creative Identity';
+        };
+
+        const slotType = (slot: Slot) => {
+          if (slot === 'I') return 'user';
+          return 'hashtag';
+        };
+
+        roundSlots.forEach((slot) => {
+          let q = pickFromSlot(slot);
+          let degraded = false;
+          if (!q) {
+            q = nextFrom(fallbackPool, fallbackIdx);
+            degraded = Boolean(q);
+          }
+          if (!q) return;
+          tasks.push({ q, label: slotLabel(slot), reason: q, type: slotType(slot), degraded });
+        });
 
         if (tasks.length === 0) break;
 
-        addLog(`Round ${round}/${maxRounds}: probing ${tasks.length} dimensions...`);
+        addLog(`Round ${round}/${maxRounds}: probing ${tasks.length} dimensions (4:4:2 scheduler).`);
+        if (tasks.some(t => t.degraded)) addLog(`Scheduler degraded: some pools exhausted, filled by fallback.`);
 
         // Streaming execution with Concurrency Control (Max 2 parallel tasks) to avoid ERR_ABORTED
         const CONCURRENCY = 2;
         for (let i = 0; i < tasks.length; i += CONCURRENCY) {
+            if (hardLimitReached || controller.signal.aborted) break roundLoop;
             const chunk = tasks.slice(i, i + CONCURRENCY);
             await Promise.all(chunk.map(async (t) => {
+                if (hardLimitReached || controller.signal.aborted) return;
                 // Add jitter
-                await new Promise(r => setTimeout(r, Math.random() * 1000));
+                await abortableDelay(Math.random() * 1000, controller.signal);
                 
-                // CRITICAL FIX V8: Correct parameter mapping for "user" searchType
-                 // If searchType is 'user', the actor expects 'usernames' (array), NOT 'search' (string).
-                 const cleanQuery = t.q.replace(/^#/, '').replace(/\s+/g, '.'); 
-                 
-                 let payload: any = {
-                     searchType: 'user', 
-                     resultsLimit: 12, // Optimized for speed: 20 is too slow for user search, 12 fits within timeout
-                     proxy: { useApifyProxy: true },
-                 };
-
-                 // Dynamically assign the correct input field based on searchType
-                 // For 'user' type, use 'usernames'. For others, use 'search'.
-                 if (payload.searchType === 'user') {
-                     payload.usernames = [cleanQuery];
-                 } else {
-                     payload.search = cleanQuery;
-                 }
+                const rawQuery = String(t.q || '').trim().replace(/^[@#]/, '');
+                const compactQuery = rawQuery.replace(/\s+/g, '');
+                const hashtag = compactQuery.replace(/^#/, '');
+                const isHashtag = t.type === 'hashtag';
 
                 try {
-                  const results = await runApifyTask(token, 'apify~instagram-search-scraper', payload, addLog);
+                  const onRunFinished = (info: any) => {
+                    const usd = typeof info.usageTotalUsd === 'number' ? info.usageTotalUsd : info.usageUsd;
+                    if (typeof usd === 'number') {
+                      setApifySpend(prev => ({
+                        lastRunUsd: usd,
+                        sessionUsd: prev.sessionUsd + usd,
+                        runCount: prev.runCount + 1,
+                      }));
+                      addLog(`Apify cost: $${usd.toFixed(4)} (${info.runId})`);
+                      refreshApifyQuota(false);
+                    }
+                  };
+
+                  let results: any[] = [];
+
+                  if (isHashtag) {
+                    let resolvedTag = hashtag;
+                    if (rawQuery !== compactQuery) {
+                      const tagHints = await runApifyTask(
+                        'apify~instagram-search-scraper',
+                        {
+                          search: rawQuery,
+                          searchType: 'hashtag',
+                          searchLimit: 5,
+                          proxy: { useApifyProxy: true },
+                        },
+                        addLog,
+                        onRunFinished,
+                        {
+                          signal: controller.signal,
+                          onRunStarted: (runId) => activeApifyRunsRef.current.add(runId),
+                        }
+                      );
+                      const best =
+                        (Array.isArray(tagHints) ? tagHints : [])
+                          .map((it: any) => String(it?.name || it?.searchTerm || it?.search || '').trim())
+                          .map((s: string) => s.replace(/^#/, '').replace(/\s+/g, '').toLowerCase())
+                          .find((s: string) => s.length > 1) || '';
+                      if (best) resolvedTag = best;
+                    }
+
+                    results = await runApifyTask(
+                      'apify~instagram-scraper',
+                      {
+                        directUrls: [`https://www.instagram.com/explore/tags/${resolvedTag}/`],
+                        resultsType: 'posts',
+                        resultsLimit: 12,
+                      },
+                      addLog,
+                      onRunFinished,
+                      {
+                        signal: controller.signal,
+                        onRunStarted: (runId) => activeApifyRunsRef.current.add(runId),
+                      }
+                    );
+                  } else {
+                    results = await runApifyTask(
+                      'apify~instagram-search-scraper',
+                      {
+                        search: rawQuery,
+                        searchType: t.type === 'top' ? 'user' : t.type,
+                        searchLimit: 10,
+                        proxy: { useApifyProxy: true },
+                      },
+                      addLog,
+                      onRunFinished,
+                      {
+                        signal: controller.signal,
+                        onRunStarted: (runId) => activeApifyRunsRef.current.add(runId),
+                      }
+                    );
+                  }
                   
                   addLog(`Dimension [${t.label}] "${t.q}" -> ${results.length} results.`);
                   ingestResults(results, t.reason);
+                  void pumpGeminiAudits();
 
                   // Update UI
-                  const mapped = Array.from(uniqueMap.values()).map((u: any, idx: number) => {
-                      const gradients = ["from-indigo-500 to-purple-600", "from-pink-500 to-rose-500", "from-emerald-400 to-cyan-500", "from-amber-400 to-orange-500"];
-                      return {
-                        id: u.username,
-                        url: `https://www.instagram.com/${u.username}/`,
-                        match_score: u.match_score,
-                        niche: u.displayName,
-                        followers: u.followers,
-                        avatar_url: u.avatarUrl,
-                        avatar_color: `bg-gradient-to-br ${gradients[idx % gradients.length]}`,
-                        is_verified: u.verified,
-                        match_reason: u.match_reason,
-                        is_commercial: u.is_commercial
-                      };
-                  });
-                  mapped.sort((a, b) => b.match_score - a.match_score);
-                  setCandidates(mapped);
+                  if (uniqueMap.size > lastPublishedSize) {
+                    lastPublishedSize = uniqueMap.size;
+                    publishCandidates();
+                  }
 
                 } catch (err: any) {
+                  if (controller.signal.aborted || isAbortError(err)) return;
                   addLog(`Dimension probe failed: ${err.message}`);
+                  if (isHardLimit(String(err?.message || ''))) {
+                    hardLimitReached = true;
+                    addLog(`Apify hard limit reached. Stop further probing and keep current results (${uniqueMap.size}).`);
+                  }
                 }
             }));
         }
@@ -478,37 +965,44 @@ Return JSON only.`));
         
         // Cooldown between rounds
         if (uniqueMap.size < targetCount) {
-             await new Promise(r => setTimeout(r, 1500));
+             await abortableDelay(1500, controller.signal);
         }
       }
 
-      const mapped = Array.from(uniqueMap.values()).map((u: any, idx: number) => {
-          const gradients = ["from-indigo-500 to-purple-600", "from-pink-500 to-rose-500", "from-emerald-400 to-cyan-500", "from-amber-400 to-orange-500"];
-          return {
-            id: u.username,
-            url: `https://www.instagram.com/${u.username}/`,
-            match_score: u.match_score,
-            niche: u.displayName,
-            followers: u.followers,
-            avatar_url: u.avatarUrl,
-            avatar_color: `bg-gradient-to-br ${gradients[idx % gradients.length]}`,
-            is_verified: u.verified,
-            match_reason: u.match_reason,
-            is_commercial: u.is_commercial
-          };
-      });
-
-      mapped.sort((a, b) => b.match_score - a.match_score);
-
-      setCandidates(mapped);
-      addLog(`Capture finished. ${mapped.length} high-aesthetic creators verified.`);
-      if (totalFiltered > 0) addLog(`De-commercialized: Suppressed ${totalFiltered} sellers/shops.`);
+      const finalCount = uniqueMap.size;
+      if (finalCount > 0) publishCandidates();
+      addLog(`Capture finished. ${finalCount} high-aesthetic creators verified.`);
+      if (totalSuppressed > 0) {
+        const parts: string[] = [];
+        if (suppressedCommercial > 0) parts.push(`${suppressedCommercial} commercial`);
+        if (suppressedOffTopic > 0) parts.push(`${suppressedOffTopic} off-topic`);
+        addLog(`Suppressed: ${totalSuppressed} (${parts.join(', ') || 'filtered'}).`);
+      }
 
     } catch (err: any) {
+      if (controller.signal.aborted || isAbortError(err)) {
+        addLog(lang === 'zh' ? '已停止：已取消拓圈任务。' : 'Stopped: sourcing cancelled.');
+        return;
+      }
       addLog("Sourcing Error: " + err.message);
     } finally {
       setLoading(false);
     }
+  };
+
+  const startSourcingGated = async () => {
+    if (!user) {
+      navigate('/login');
+      return;
+    }
+    if (typeof credits === 'number' && credits <= 0) {
+      openCreditsModal();
+      return;
+    }
+    if (loading) return;
+    const ok = await deductBeforeCostlyAction();
+    if (!ok) return;
+    await startSourcing();
   };
 
   const triggerDeepAudit = (candidate: Candidate) => {
@@ -522,6 +1016,9 @@ Return JSON only.`));
     setLoading(true);
     setResult(null);
     addLog(`Performing Deep Audit on Target: ${url}`);
+    const controller = new AbortController();
+    taskControllerRef.current = controller;
+    activeApifyRunsRef.current.clear();
 
     // Extract username from URL
     let targetUsername = url.replace(/\/$/, '').split('/').pop() || url;
@@ -534,7 +1031,21 @@ Return JSON only.`));
     }
     
     try {
-      const igData = await fetchInstagramData(targetUsername, apifyToken, addLog);
+      const igData = await fetchInstagramData(targetUsername, addLog, (info) => {
+        const usd = typeof info.usageTotalUsd === 'number' ? info.usageTotalUsd : info.usageUsd;
+        if (typeof usd === 'number') {
+          setApifySpend(prev => ({
+            lastRunUsd: usd,
+            sessionUsd: prev.sessionUsd + usd,
+            runCount: prev.runCount + 1,
+          }));
+          addLog(`Apify cost: $${usd.toFixed(4)} (${info.runId})`);
+          refreshApifyQuota(false);
+        }
+      }, {
+        signal: controller.signal,
+        onRunStarted: (runId) => activeApifyRunsRef.current.add(runId),
+      });
       
       if (!igData) {
          throw new Error("Failed to retrieve Instagram data");
@@ -550,10 +1061,11 @@ Return JSON only.`));
 
       // Sequential processing to avoid overwhelming the proxy
       for (const p of imageQueue) {
+         if (controller.signal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
          if (!p.imageUrl) continue;
          try {
            const proxyUrl = `/api/image?url=${encodeURIComponent(p.imageUrl)}`;
-           const res = await fetch(proxyUrl);
+           const res = await fetch(proxyUrl, { signal: controller.signal });
 
            if (!res.ok) continue;
            
@@ -563,7 +1075,7 @@ Return JSON only.`));
            validImages.push({ inlineData: { data: base64, mimeType: "image/jpeg" } });
            
            // Small delay to be nice to the proxy
-           await new Promise(r => setTimeout(r, 200));
+           await abortableDelay(200, controller.signal);
          } catch (e) {
            console.warn("Image fetch failed:", p.imageUrl);
          }
@@ -603,7 +1115,7 @@ Return JSON only.`));
       `;
 
       const parts = [...validImages, { text: prompt }];
-      const text = await geminiGenerateJson(parts);
+      const text = await geminiGenerateJson(parts, controller.signal, 120000);
       const aiResult = JSON.parse(text || '{}');
       
       // Calculate costs (approximate)
@@ -638,10 +1150,29 @@ Return JSON only.`));
       addLog("Deep Audit Complete. Report Generated.");
 
     } catch (err: any) {
+      if (controller.signal.aborted || isAbortError(err)) {
+        addLog(lang === 'zh' ? '已停止：已取消审计任务。' : 'Stopped: audit cancelled.');
+        return;
+      }
       addLog("Audit Error: " + err.message);
     } finally {
       setLoading(false);
     }
+  };
+
+  const runAuditGated = async () => {
+    if (!user) {
+      navigate('/login');
+      return;
+    }
+    if (typeof credits === 'number' && credits <= 0) {
+      openCreditsModal();
+      return;
+    }
+    if (loading) return;
+    const ok = await deductBeforeCostlyAction();
+    if (!ok) return;
+    await runAudit();
   };
 
   const resetDiscovery = () => {
@@ -657,8 +1188,41 @@ Return JSON only.`));
         setLang={setLang} 
         mode={mode} 
         setMode={setMode} 
-        onLogout={handleLogout}
+        onLogout={() => void handleLogout()}
+        credits={credits}
+        creditsLoading={Boolean(user && profileLoading)}
       />
+      {creditsModalOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-6">
+          <div className="w-full max-w-md bg-white rounded-[2rem] shadow-2xl border border-slate-100 p-8">
+            <div className="text-sm font-black text-slate-900 uppercase tracking-widest">
+              {lang === 'zh' ? '额度已耗尽' : 'Credits Exhausted'}
+            </div>
+            <div className="mt-3 text-xs font-bold text-slate-500 leading-relaxed">
+              {creditsModalDetail
+                ? lang === 'zh'
+                  ? `扣点失败：${creditsModalDetail}`
+                  : `Deduct failed: ${creditsModalDetail}`
+                : lang === 'zh'
+                  ? '当前试用点数不足，无法继续执行高成本动作。请联系管理员获取点数。'
+                  : 'You have no credits left. Contact admin to get more credits.'}
+            </div>
+            {creditsModalDetail && (
+              <div className="mt-4 text-[10px] font-bold text-slate-400 leading-relaxed">
+                {lang === 'zh'
+                  ? '如果提示 function 不存在/权限不足：去 Supabase SQL Editor 重新执行 supabase.sql。'
+                  : 'If it says function missing/permission denied: re-run supabase.sql in Supabase SQL Editor.'}
+              </div>
+            )}
+            <button
+              onClick={() => setCreditsModalOpen(false)}
+              className="mt-6 w-full py-4 bg-slate-900 text-white rounded-2xl font-black text-xs shadow-lg hover:bg-indigo-700 transition-all active:scale-95"
+            >
+              {lang === 'zh' ? '知道了' : 'OK'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <main className="max-w-7xl mx-auto mt-12 px-10 grid grid-cols-1 lg:grid-cols-12 gap-12">
         <div className="lg:col-span-4 space-y-8">
@@ -667,6 +1231,8 @@ Return JSON only.`));
             mode={mode}
             apifyToken={apifyToken}
             setApifyToken={setApifyToken}
+            apifyQuota={apifyQuota}
+            apifySpend={apifySpend}
             productImg={productImg}
             setProductImg={setProductImg}
             productDesc={productDesc}
@@ -677,8 +1243,20 @@ Return JSON only.`));
             setBrandProfile={setBrandProfile}
             loading={loading}
             analyzeProduct={analyzeProduct}
-            runAudit={runAudit}
+            runAudit={runAuditGated}
             resetDiscovery={resetDiscovery}
+            auditActionLabel={
+              !user
+                ? lang === 'zh'
+                  ? '登录后开启全网拦截'
+                  : 'Sign in to start'
+                : typeof credits === 'number' && credits <= 0
+                  ? lang === 'zh'
+                    ? '额度已耗尽，请联系管理员'
+                    : 'No credits left'
+                  : undefined
+            }
+            auditActionLocked={Boolean(user && typeof credits === 'number' && credits <= 0)}
           />
 
           {mode === 'discovery' && (
@@ -691,7 +1269,12 @@ Return JSON only.`));
             />
           )}
 
-          <LogViewer logs={logs} />
+          <LogViewer
+            logs={logs}
+            canCancel={loading}
+            onCancel={cancelCurrentTask}
+            cancelLabel={lang === 'zh' ? '停止' : 'Stop'}
+          />
         </div>
 
         <div className="lg:col-span-8 space-y-10">
@@ -703,7 +1286,19 @@ Return JSON only.`));
                 candidates={candidates}
                 loading={loading}
                 apifyToken={apifyToken}
-                startSourcing={startSourcing}
+                startSourcing={startSourcingGated}
+                startSourcingLabel={
+                  !user
+                    ? lang === 'zh'
+                      ? '登录后开启全网拦截'
+                      : 'Sign in to start'
+                    : typeof credits === 'number' && credits <= 0
+                      ? lang === 'zh'
+                        ? '额度已耗尽，请联系管理员'
+                        : 'No credits left'
+                      : undefined
+                }
+                startSourcingLocked={Boolean(user && typeof credits === 'number' && credits <= 0)}
               />
               {candidates.length > 0 && (
                 <CandidateList

@@ -10,6 +10,102 @@ import path from 'path';
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const readBody = async (req: any): Promise<Buffer | undefined> => {
+  const method = (req?.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD') return undefined;
+  return await new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+    req.on('end', () => resolve(chunks.length ? Buffer.concat(chunks) : Buffer.from('')));
+    req.on('error', reject);
+  });
+};
+
+const setResponseHeaders = (res: any, headers: Headers) => {
+  headers.forEach((value, key) => {
+    const k = key.toLowerCase();
+    if (k === 'transfer-encoding') return;
+    if (k === 'content-encoding') return;
+    res.setHeader(key, value);
+  });
+};
+
+const secureUpstreamProxyPlugin = (env: Record<string, string>) => {
+  const geminiKey = env.VETTA_GEMINI_KEY || env.GEMINI_API_KEY || '';
+  const apifyToken = env.APIFY_API_TOKEN || '';
+
+  return {
+    name: 'vetta-secure-upstream-proxy',
+    configureServer(server: any) {
+      server.middlewares.use('/api/gemini', async (req: any, res: any) => {
+        if (!geminiKey) {
+          res.statusCode = 500;
+          res.end('Missing Gemini API key (server env)');
+          return;
+        }
+
+        try {
+          const incoming = new URL(req.url || '/', 'http://localhost');
+          incoming.searchParams.delete('key');
+          const upstream = new URL(`https://generativelanguage.googleapis.com${incoming.pathname}${incoming.search}`);
+          upstream.searchParams.set('key', geminiKey);
+
+          const body = await readBody(req);
+          const upstreamRes = await fetch(upstream.toString(), {
+            method: req.method,
+            headers: {
+              'Content-Type': req.headers['content-type'] || 'application/json',
+              'Accept': req.headers['accept'] || '*/*',
+            },
+            body: body as any,
+          });
+
+          res.statusCode = upstreamRes.status;
+          setResponseHeaders(res, upstreamRes.headers);
+          const buf = Buffer.from(await upstreamRes.arrayBuffer());
+          res.end(buf);
+        } catch (e: any) {
+          res.statusCode = 502;
+          res.end(e?.message || 'Gemini proxy error');
+        }
+      });
+
+      server.middlewares.use('/api/apify', async (req: any, res: any) => {
+        if (!apifyToken) {
+          res.statusCode = 500;
+          res.end('Missing Apify token (server env)');
+          return;
+        }
+
+        try {
+          const incoming = new URL(req.url || '/', 'http://localhost');
+          incoming.searchParams.delete('token');
+          const upstream = new URL(`https://api.apify.com/v2${incoming.pathname}${incoming.search}`);
+
+          const body = await readBody(req);
+          const upstreamRes = await fetch(upstream.toString(), {
+            method: req.method,
+            headers: {
+              Authorization: `Bearer ${apifyToken}`,
+              'Content-Type': req.headers['content-type'] || 'application/json',
+              'Accept': req.headers['accept'] || '*/*',
+            },
+            body: body as any,
+          });
+
+          res.statusCode = upstreamRes.status;
+          setResponseHeaders(res, upstreamRes.headers);
+          const buf = Buffer.from(await upstreamRes.arrayBuffer());
+          res.end(buf);
+        } catch (e: any) {
+          res.statusCode = 502;
+          res.end(e?.message || 'Apify proxy error');
+        }
+      });
+    },
+  };
+};
+
 const imageProxyPlugin = () => {
   return {
     name: 'vetta-image-proxy',
@@ -75,31 +171,16 @@ const imageProxyPlugin = () => {
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
-    console.log('Loaded APIFY_API_TOKEN:', env.APIFY_API_TOKEN ? 'Present (Starts with ' + env.APIFY_API_TOKEN.substring(0, 5) + ')' : 'Missing');
+    console.log('Loaded APIFY_API_TOKEN:', env.APIFY_API_TOKEN ? 'Present' : 'Missing');
     return {
       server: {
         port: 3000,
         host: '0.0.0.0',
-        proxy: {
-          '/api/apify': {
-            target: 'https://api.apify.com/v2',
-            changeOrigin: true,
-            rewrite: (path) => path.replace(/^\/api\/apify/, ''),
-            timeout: 120000, // Increase timeout to 120s for long-running Apify tasks
-            proxyTimeout: 120000
-          },
-          '/api/gemini': {
-            target: 'https://generativelanguage.googleapis.com',
-            changeOrigin: true,
-            rewrite: (path) => path.replace(/^\/api\/gemini/, '')
-          }
-        }
       },
-      plugins: [react(), imageProxyPlugin()],
+      plugins: [react(), secureUpstreamProxyPlugin(env), imageProxyPlugin()],
       define: {
-        'process.env.API_KEY': JSON.stringify(env.VETTA_GEMINI_KEY || env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.VETTA_GEMINI_KEY || env.GEMINI_API_KEY),
-        'process.env.APIFY_API_TOKEN': JSON.stringify(env.APIFY_API_TOKEN || '')
+        'process.env.VETTA_HAS_GEMINI_KEY': JSON.stringify(Boolean(env.VETTA_GEMINI_KEY || env.GEMINI_API_KEY)),
+        'process.env.VETTA_HAS_APIFY_TOKEN': JSON.stringify(Boolean(env.APIFY_API_TOKEN))
       },
       resolve: {
         alias: {
