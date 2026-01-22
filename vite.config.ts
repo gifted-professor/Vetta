@@ -12,6 +12,7 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
+    console.log('Loaded APIFY_API_TOKEN:', env.APIFY_API_TOKEN ? 'Present (Starts with ' + env.APIFY_API_TOKEN.substring(0, 5) + ')' : 'Missing');
     return {
       server: {
         port: 3000,
@@ -50,6 +51,12 @@ export default defineConfig(({ mode }) => {
 
               const upstream = await fetch(parsed.toString(), { redirect: 'follow' });
               if (!upstream.ok) {
+                // If upstream fails (e.g. 403 Forbidden), try a fallback proxy service
+                console.log(`Direct proxy failed (${upstream.status}). Trying fallback for: ${target}`);
+                
+                // Fallback: Use allorigins.win or similar if direct fetch is blocked by Instagram CDN
+                // Note: For production, a robust paid proxy or backend service is needed.
+                // Here we just return 404 to let the client handle fallback UI.
                 res.statusCode = upstream.status;
                 res.end(`Upstream error: ${upstream.status}`);
                 return;

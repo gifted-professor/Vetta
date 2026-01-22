@@ -7,7 +7,7 @@
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
  */
 import React from 'react';
-import { ShieldCheck, Compass, Zap, Filter, Compass as CompassIcon } from 'lucide-react';
+import { ShieldCheck, Compass, Zap, Filter, Compass as CompassIcon, LogOut } from 'lucide-react';
 import { translations } from '../locales/translations';
 
 interface HeaderProps {
@@ -15,9 +15,10 @@ interface HeaderProps {
   setLang: (lang: 'zh' | 'en') => void;
   mode: 'discovery' | 'audit';
   setMode: (mode: 'discovery' | 'audit') => void;
+  onLogout: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ lang, setLang, mode, setMode }) => {
+export const Header: React.FC<HeaderProps> = ({ lang, setLang, mode, setMode, onLogout }) => {
   const t = translations[lang];
 
   return (
@@ -64,22 +65,32 @@ export const Header: React.FC<HeaderProps> = ({ lang, setLang, mode, setMode }) 
         </button>
       </nav>
 
-      <div className="flex bg-slate-100 p-1 rounded-xl">
+      <div className="flex items-center gap-4">
+        <div className="flex bg-slate-100 p-1 rounded-xl">
+          <button
+            onClick={() => setLang('zh')}
+            className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all ${
+              lang === 'zh' ? 'bg-white text-indigo-600' : 'text-slate-400'
+            }`}
+          >
+            ZH
+          </button>
+          <button
+            onClick={() => setLang('en')}
+            className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all ${
+              lang === 'en' ? 'bg-white text-indigo-600' : 'text-slate-400'
+            }`}
+          >
+            EN
+          </button>
+        </div>
+        
         <button
-          onClick={() => setLang('zh')}
-          className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all ${
-            lang === 'zh' ? 'bg-white text-indigo-600' : 'text-slate-400'
-          }`}
+          onClick={onLogout}
+          className="p-2.5 rounded-xl bg-slate-100 text-slate-400 hover:bg-rose-50 hover:text-rose-500 transition-all"
+          title="Sign Out"
         >
-          ZH
-        </button>
-        <button
-          onClick={() => setLang('en')}
-          className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all ${
-            lang === 'en' ? 'bg-white text-indigo-600' : 'text-slate-400'
-          }`}
-        >
-          EN
+          <LogOut size={16} />
         </button>
       </div>
     </header>

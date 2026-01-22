@@ -26,14 +26,28 @@ export const runApifyTask = async (
   payload: any,
   addLog: (msg: string) => void
 ): Promise<any[]> => {
+  const cleanToken = token ? token.trim() : '';
+  if (!cleanToken) {
+    addLog('Error: Apify Token is empty/undefined!');
+    throw new Error('Apify Token is missing');
+  }
+  addLog(`Debug: Using Apify Token: ${cleanToken.substring(0, 5)}...${cleanToken.substring(cleanToken.length - 4)}`);
+
+  // HYBRID MODE SELECTION
+  // Mode A: Sync Direct (Fastest, for audit/scraper)
+  // Mode B: Async Polling (Robust, for search/discovery)
+  // REVERT TO ASYNC POLLING FOR STABILITY
+  // Sync mode caused browser timeouts (ERR_ABORTED), so we use polling for everything but keep the V3.1 parameters.
+  
+  addLog(`Mode: Async Polling Execution (${actorId})...`);
   const baseUrl = '/api/apify';
   const headers = {
-    Authorization: `Bearer ${token}`,
+    Authorization: `Bearer ${cleanToken}`,
     'Content-Type': 'application/json',
   };
   
   // 1. Start the run
-  const startUrl = `${baseUrl}/acts/${actorId}/runs?token=${token}`;
+  const startUrl = `${baseUrl}/acts/${actorId}/runs?token=${cleanToken}`;
   const startRes = await fetch(startUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -127,15 +141,28 @@ export const fetchInstagramData = async (
   
   addLog(`Connecting to Apify (${actorId})...`);
 
-  // Minimal payload to ensure actor compatibility
+  // Try directUrls first as it's more reliable for some profiles
   const payload = {
-    usernames: [username],
-    resultsLimit: 12
+    directUrls: [`https://www.instagram.com/${username}/`],
+    resultsLimit: 12,
+    // searchType: 'details', // Removed: Not supported by apify~instagram-scraper in this mode
+    // proxy: { useApifyProxy: true }, // Removed: Let Apify handle proxy rotation automatically to avoid stuck sessions
+    resultsType: 'posts' // Ensure we get posts data
   };
 
   try {
     const results = await runApifyTask(token, actorId, payload, addLog);
     
+    // Check for specific error object returned by Apify
+    if (results && results.length === 1 && (results[0].error || results[0].errorDescription)) {
+       const errItem = results[0];
+       addLog(`Apify Error: ${errItem.error} - ${errItem.errorDescription}`);
+       if (errItem.error === 'no_items') {
+          addLog("Possible causes: Private account, Invalid username, or Geo-restriction.");
+       }
+       return null;
+    }
+
     if (!results || results.length === 0) {
       addLog('No data found for this user.');
       return null;
